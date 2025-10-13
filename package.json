@@ -14,7 +14,7 @@
 		"dev": "tsx watch analyze-enhanced.ts",
 		"scan": "tsx analyze-enhanced.ts -- --incremental true",
 		"serve": "tsx analyze-enhanced.ts -- --serve true",
-		"export": "tsx analyze-enhanced.ts -- --export analytics.json",
+		"export": "tsx analyze-enhanced.ts -- --incremental true --export analytics.json",
 		"db:check": "tsx check-db.ts",
 		"db:reset": "rm -f citrea_cache.db* && echo 'Database deleted.'",
 		"type-check": "tsc --noEmit",

@@ -53,22 +53,28 @@ See [docs/configuration.md](docs/configuration.md) for all options.
 
 ## Usage
 
-### Basic Scan
+### Full Enhanced Scan
 
 ```bash
 pnpm start
 ```
 
+### Basic Version
+
+```bash
+pnpm start:basic
+```
+
 ### Incremental Scan
 
 ```bash
-pnpm start -- --incremental true
+pnpm scan
 ```
 
 ### Start API Server
 
 ```bash
-pnpm start -- --serve true
+pnpm serve
 ```
 
 Access at: `http://localhost:3000/metrics`
@@ -76,7 +82,7 @@ Access at: `http://localhost:3000/metrics`
 ### Export to JSON
 
 ```bash
-pnpm start -- --export usage.json
+pnpm export
 ```
 
 ### Combined Options

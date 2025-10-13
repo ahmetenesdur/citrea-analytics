@@ -88,7 +88,8 @@ pm2 save
 ```bash
 #!/bin/bash
 DATE=$(date +%Y-%m-%d)
-pnpm export -- --export "reports/$DATE.json"
+# Export to dated file (override default analytics.json)
+pnpm start -- --incremental true --export "reports/$DATE.json"
 ```
 
 ## Database Management

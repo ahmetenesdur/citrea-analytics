@@ -212,7 +212,7 @@ pnpm start
 **Solution:**
 
 ```bash
-pnpm run db:reset
+pnpm db:reset
 pnpm start
 ```
 
@@ -291,7 +291,7 @@ sqlite3 citrea_cache.db ".backup backups/citrea_cache_$(date +%Y%m%d_%H%M%S).db"
 
 ```bash
 # Save logs to file
-pnpm start >> logs/scan_$(date +%Y%m%d).log 2>&1
+pnpm scan >> logs/scan_$(date +%Y%m%d).log 2>&1
 
 # Clean old logs (30+ days)
 find logs/ -name "scan_*.log" -mtime +30 -delete
