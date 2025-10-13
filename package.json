@@ -1,15 +1,23 @@
 {
 	"name": "citrea-analytics",
 	"version": "1.0.0",
+	"description": "Analyze smart contract activity on Citrea Testnet with SQLite caching and incremental scanning",
 	"type": "module",
-	"private": true,
+	"author": {
+		"name": "Ahmet Enes Dur",
+		"email": "ahmetenesdur@gmail.com",
+		"url": "https://github.com/ahmetenesdur"
+	},
 	"scripts": {
 		"start": "tsx analyze-enhanced.ts",
-		"scan": "tsx analyze.ts",
-		"scan:enhanced": "tsx analyze-enhanced.ts",
+		"start:basic": "tsx analyze.ts",
 		"dev": "tsx watch analyze-enhanced.ts",
+		"scan": "tsx analyze-enhanced.ts -- --incremental true",
+		"serve": "tsx analyze-enhanced.ts -- --serve true",
+		"export": "tsx analyze-enhanced.ts -- --export analytics.json",
 		"db:check": "tsx check-db.ts",
-		"db:reset": "rm -f citrea_cache.db && echo 'Database deleted. Run pnpm start to recreate.'",
+		"db:reset": "rm -f citrea_cache.db* && echo 'Database deleted.'",
+		"type-check": "tsc --noEmit",
 		"format": "prettier --write .",
 		"postinstall": "node -e \"try { require('better-sqlite3') } catch {}\""
 	},

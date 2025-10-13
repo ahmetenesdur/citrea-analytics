@@ -5,17 +5,20 @@ Complete guide for using Citrea Analytics.
 ## Quick Reference
 
 ```bash
-# Basic scan
+# Full enhanced scan
 pnpm start
 
+# Basic version
+pnpm start:basic
+
 # Incremental scan
-pnpm start -- --incremental true
+pnpm scan
 
 # Start API server
-pnpm start -- --serve true
+pnpm serve
 
 # Export to JSON
-pnpm start -- --export analytics.json
+pnpm export
 
 # All options combined
 pnpm start -- --incremental true --serve true --export report.json
@@ -50,17 +53,17 @@ pnpm start
 
 ```bash
 # Scan only new blocks
-pnpm start -- --incremental true
+pnpm scan
 ```
 
 ### Automated Scanning
 
 ```bash
 # Add to crontab: daily at midnight
-0 0 * * * cd /path/to/citrea-analytics && pnpm start -- --incremental true
+0 0 * * * cd /path/to/citrea-analytics && pnpm scan
 
 # Hourly scan
-0 * * * * cd /path/to/citrea-analytics && pnpm start -- --incremental true
+0 * * * * cd /path/to/citrea-analytics && pnpm scan
 ```
 
 ### Running as Service
@@ -70,7 +73,7 @@ pnpm start -- --incremental true
 npm install -g pm2
 
 # Start server
-pm2 start "pnpm start -- --serve true" --name citrea-api
+pm2 start "pnpm serve" --name citrea-api
 
 # View logs
 pm2 logs citrea-api
@@ -85,7 +88,7 @@ pm2 save
 ```bash
 #!/bin/bash
 DATE=$(date +%Y-%m-%d)
-pnpm start -- --incremental true --export "reports/$DATE.json"
+pnpm export -- --export "reports/$DATE.json"
 ```
 
 ## Database Management
@@ -93,13 +96,13 @@ pnpm start -- --incremental true --export "reports/$DATE.json"
 ### Check Database Status
 
 ```bash
-pnpm run db:check
+pnpm db:check
 ```
 
 ### Reset Database
 
 ```bash
-pnpm run db:reset
+pnpm db:reset
 pnpm start
 ```
 
@@ -166,7 +169,7 @@ ls -lh citrea_cache.db
 ### Measure Scan Time
 
 ```bash
-time pnpm start -- --incremental true
+time pnpm scan
 ```
 
 ### Adjust Batch Size

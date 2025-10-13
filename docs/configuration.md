@@ -184,6 +184,11 @@ pnpm start
 # Overrides CONTRACT_ADDRESS from .env
 pnpm start -- --address 0xOtherAddress
 
+# Simplified commands
+pnpm scan              # Incremental scan
+pnpm serve             # API server
+pnpm export            # Export to analytics.json
+
 # .env sets defaults, CLI adds options
 pnpm start -- --incremental true --serve true
 ```

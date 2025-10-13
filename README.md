@@ -143,7 +143,6 @@ citrea-analytics/
 - Viem (Ethereum client)
 - pnpm
 
-## Author
+---
 
-**Ahmet Enes Dur**  
-ahmetenesdur@gmail.com
+[![GitHub](https://img.shields.io/badge/GitHub-ahmetenesdur-blue?logo=github)](https://github.com/ahmetenesdur)

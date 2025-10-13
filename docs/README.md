@@ -103,9 +103,12 @@ Learn how incremental scanning works, database structure, and maintenance.
 
 ### Current Version: 1.0.0
 
+**Author**: Ahmet Enes Dur (ahmetenesdur@gmail.com)
+
 **Features**:
 
 - ✅ Enhanced version as default (`pnpm start`)
+- ✅ Simplified scripts (`pnpm scan`, `pnpm serve`, `pnpm export`)
 - ✅ Incremental scanning with SQLite cache
 - ✅ Complete documentation
 - ✅ HTTP API server

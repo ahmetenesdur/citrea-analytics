@@ -69,7 +69,7 @@ pnpm start
 ### Subsequent Runs
 
 ```bash
-pnpm start -- --incremental true
+pnpm scan
 ```
 
 1. Reads `lastScannedBlock` from database
@@ -106,7 +106,7 @@ pnpm start -- --incremental true
 ### Check Status
 
 ```bash
-pnpm run db:check
+pnpm db:check
 ```
 
 Output:
@@ -134,7 +134,7 @@ Output:
 ### Reset Database
 
 ```bash
-pnpm run db:reset
+pnpm db:reset
 ```
 
 ⚠️ **Warning:** This deletes all data!
@@ -281,10 +281,10 @@ sqlite3 citrea_cache.db ".backup backups/citrea_cache_$(date +%Y%m%d_%H%M%S).db"
 
 ```bash
 # Cron: Every 6 hours
-0 */6 * * * cd /path/to/citrea-analytics && pnpm start -- --incremental true
+0 */6 * * * cd /path/to/citrea-analytics && pnpm scan
 
 # Cron: Daily at midnight
-0 0 * * * cd /path/to/citrea-analytics && pnpm start -- --incremental true
+0 0 * * * cd /path/to/citrea-analytics && pnpm scan
 ```
 
 ### Log Rotation
@@ -304,7 +304,7 @@ find logs/ -name "scan_*.log" -mtime +30 -delete
 watch -n 60 'ls -lh citrea_cache.db'
 
 # Monitor via API
-pnpm start -- --serve true &
+pnpm serve &
 curl http://localhost:3000/metrics | jq
 ```
 
@@ -325,6 +325,7 @@ curl http://localhost:3000/metrics | jq
 
 **Commands:**
 
-- `pnpm start` → Incremental scan
-- `pnpm run db:check` → Check status
-- `pnpm run db:reset` → Reset database
+- `pnpm start` → Full enhanced scan
+- `pnpm scan` → Incremental scan
+- `pnpm db:check` → Check status
+- `pnpm db:reset` → Reset database
