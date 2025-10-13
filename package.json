@@ -1,0 +1,28 @@
+{
+	"name": "citrea-analytics",
+	"version": "1.0.0",
+	"type": "module",
+	"private": true,
+	"scripts": {
+		"start": "tsx analyze-enhanced.ts",
+		"scan": "tsx analyze.ts",
+		"scan:enhanced": "tsx analyze-enhanced.ts",
+		"dev": "tsx watch analyze-enhanced.ts",
+		"db:check": "tsx check-db.ts",
+		"db:reset": "rm -f citrea_cache.db && echo 'Database deleted. Run pnpm start to recreate.'",
+		"format": "prettier --write .",
+		"postinstall": "node -e \"try { require('better-sqlite3') } catch {}\""
+	},
+	"dependencies": {
+		"better-sqlite3": "latest",
+		"dotenv": "latest",
+		"viem": "latest"
+	},
+	"devDependencies": {
+		"@types/better-sqlite3": "latest",
+		"@types/node": "latest",
+		"prettier": "^3.6.2",
+		"tsx": "latest",
+		"typescript": "latest"
+	}
+}
