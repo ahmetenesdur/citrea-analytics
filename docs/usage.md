@@ -26,12 +26,15 @@ pnpm start -- --incremental true --serve true --export report.json
 
 ## CLI Options
 
-| Option          | Type    | Default     | Description                 |
-| --------------- | ------- | ----------- | --------------------------- |
-| `--address`     | Address | From `.env` | Contract address to scan    |
-| `--incremental` | Boolean | `false`     | Resume from last checkpoint |
-| `--serve`       | Boolean | `false`     | Start HTTP API server       |
-| `--export`      | String  | -           | Export metrics to JSON file |
+| Option            | Type    | Default     | Description                 |
+| ----------------- | ------- | ----------- | --------------------------- |
+| `--address`       | Address | From `.env` | Contract address to scan    |
+| `--incremental`   | Boolean | `false`     | Resume from last checkpoint |
+| `--serve`         | Boolean | `false`     | Start HTTP API server       |
+| `--export`        | String  | -           | Export metrics to JSON file |
+| `--includeEvents` | Boolean | `false`     | Include raw `swapEvents`    |
+| `--eventsLimit`   | Number  | `10`        | Limit for raw events        |
+| `--recentLimit`   | Number  | `10`        | Limit for `recentSwaps`     |
 
 ## Common Workflows
 
@@ -153,6 +156,20 @@ const metrics = await response.json();
 
 console.log(`Unique Users: ${metrics.uniqueUsers}`);
 console.log(`Total Swaps: ${metrics.totalSwaps}`);
+console.log(`Total Fees: ${metrics.totalFees_cBTC} cBTC`);
+console.log(
+	`Latest Day Fees: ${metrics.dailyStats?.[0]?.day} ${metrics.dailyStats?.[0]?.fees_cBTC} cBTC`
+);
+console.log(
+	`Recent Swap #1: ${metrics.recentSwaps?.[0]?.amountIn} → ${metrics.recentSwaps?.[0]?.amountOut}`
+);
+
+// Additional fields:
+// - metrics.volumeByToken.inbound/outbound: normalized using token decimals & symbols
+// - metrics.topTokenPairs: volumes normalized per token pair
+// - metrics.dailyStats[].fees_cBTC: daily aggregated fees in cBTC
+// - metrics.range: { firstBlock, lastBlock, lastUpdatedAt }
+// - metrics.recentSwaps: last N swaps (normalized)
 ```
 
 ## Performance Tips

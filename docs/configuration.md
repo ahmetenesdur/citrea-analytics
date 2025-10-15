@@ -173,6 +173,44 @@ API_PORT=3000
 API_HOST=localhost
 ```
 
+### Output & Summaries
+
+#### INCLUDE_EVENTS
+
+- **Type:** Boolean
+- **Default:** `false`
+- **Description:** Include raw `swapEvents` array in API/JSON output
+
+```bash
+INCLUDE_EVENTS=false
+```
+
+#### EVENTS_LIMIT
+
+- **Type:** Number
+- **Default:** `10`
+- **Description:** Max number of raw swap events to include when `INCLUDE_EVENTS=true`
+
+```bash
+EVENTS_LIMIT=10
+```
+
+#### RECENT_SWAPS_LIMIT
+
+- **Type:** Number
+- **Default:** `10`
+- **Description:** Number of summarized recent swaps to include (`recentSwaps`)
+
+```bash
+RECENT_SWAPS_LIMIT=10
+```
+
+## Notes for New Metrics
+
+- No additional environment variables are required for `totalFees_cBTC` or daily fees (`dailyStats.fees_cBTC`).
+- Token normalization uses on-chain ERC20 metadata; common tokens (USDC/USDT/WBTC/WETH) apply known decimals heuristics for robustness.
+- Raw events are optional via `INCLUDE_EVENTS`/`EVENTS_LIMIT`; summarized `recentSwaps` count is controlled by `RECENT_SWAPS_LIMIT`.
+
 ## CLI Parameter Override
 
 CLI parameters take precedence over environment variables:
@@ -265,14 +303,17 @@ API_PORT=8080
 
 ## Default Values
 
-| Variable         | Default                                    | Type    |
-| ---------------- | ------------------------------------------ | ------- |
-| CITREA_RPC_URL   | https://rpc.testnet.citrea.xyz             | String  |
-| CITREA_CHAIN_ID  | 5115                                       | Number  |
-| CONTRACT_ADDRESS | 0x72B1fC6b54733250F4e18dA4A20Bb2DCbC598556 | Address |
-| DATABASE_FILE    | citrea_cache.db                            | String  |
-| BATCH_SIZE       | 1000                                       | Number  |
-| MAX_RETRIES      | 3                                          | Number  |
-| RETRY_DELAY_MS   | 1000                                       | Number  |
-| API_PORT         | 3000                                       | Number  |
-| API_HOST         | localhost                                  | String  |
+| Variable           | Default                                    | Type    |
+| ------------------ | ------------------------------------------ | ------- |
+| CITREA_RPC_URL     | https://rpc.testnet.citrea.xyz             | String  |
+| CITREA_CHAIN_ID    | 5115                                       | Number  |
+| CONTRACT_ADDRESS   | 0x72B1fC6b54733250F4e18dA4A20Bb2DCbC598556 | Address |
+| DATABASE_FILE      | citrea_cache.db                            | String  |
+| BATCH_SIZE         | 1000                                       | Number  |
+| MAX_RETRIES        | 3                                          | Number  |
+| RETRY_DELAY_MS     | 1000                                       | Number  |
+| API_PORT           | 3000                                       | Number  |
+| API_HOST           | localhost                                  | String  |
+| INCLUDE_EVENTS     | false                                      | Boolean |
+| EVENTS_LIMIT       | 10                                         | Number  |
+| RECENT_SWAPS_LIMIT | 10                                         | Number  |

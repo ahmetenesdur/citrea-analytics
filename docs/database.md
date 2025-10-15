@@ -54,6 +54,34 @@ CREATE TABLE swap_events (
 
 Indexes: `token_in, token_out`, `sender`
 
+#### `fees` - Transaction Fee Records
+
+```sql
+CREATE TABLE fees (
+  tx_hash TEXT PRIMARY KEY,
+  fee_wei TEXT NOT NULL,
+  FOREIGN KEY(tx_hash) REFERENCES logs(tx_hash)
+);
+```
+
+Indexes: `tx_hash`
+
+Stores actual paid fee per transaction in wei (`gasUsed * effectiveGasPrice`). Useful for computing `totalFees_cBTC`.
+
+#### `token_metadata` - Token Decimals and Symbols
+
+```sql
+CREATE TABLE token_metadata (
+  address TEXT PRIMARY KEY,
+  decimals INTEGER NOT NULL,
+  symbol TEXT NOT NULL
+);
+```
+
+Indexes: `address`
+
+Stores ERC20 metadata used to normalize volumes correctly. Decimals are sanitized and common tokens use heuristics (e.g., USDC/USDT=6, WBTC=8, WETH=18).
+
 ## How Incremental Scanning Works
 
 ### First Run
@@ -191,6 +219,46 @@ LEFT JOIN swap_events s ON l.tx_hash = s.tx_hash
 WHERE l.from_address = '0x...'
 ORDER BY l.block_number DESC;
 ```
+
+### Total Fees (cBTC)
+
+```sql
+
+SELECT (SUM(CAST(fee_wei AS REAL)) / 1e18) AS total_fees_cbtc FROM fees;
+```
+
+Or in application code, sum `fee_wei` as BigInt and format `wei → cBTC`.
+
+### Fees By Day
+
+```sql
+SELECT
+  strftime('%Y-%m-%d', l.timestamp, 'unixepoch') AS day,
+  SUM(CAST(f.fee_wei AS REAL)) / 1e18 AS fees_cBTC
+FROM fees f
+JOIN logs l ON l.tx_hash = f.tx_hash
+GROUP BY day
+ORDER BY day DESC
+LIMIT 30;
+```
+
+Application code should aggregate with BigInt for exact results.
+
+API Note: Daily fees (`fees_cBTC`) are merged into `dailyStats` items on the `/metrics` response for convenience.
+
+## Backfill Process
+
+**Fees Backfill**
+
+- Fills `fees(tx_hash, fee_wei)` for existing `logs` using `gasUsed * effectiveGasPrice`.
+
+**Event Backfill**
+
+- Decodes `Swap` events from receipts for `logs` missing `swap_events` records.
+
+**Token Metadata Backfill**
+
+- Reads ERC20 `decimals` & `symbol` for tokens seen in `swap_events` and stores in `token_metadata`.
 
 ## Troubleshooting
 

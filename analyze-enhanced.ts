@@ -6,7 +6,7 @@ import { defineChain } from "viem/utils";
 import Database from "better-sqlite3";
 import { createServer } from "node:http";
 import { writeFileSync } from "node:fs";
-import { citreaRouterAbi } from "./abi";
+import { citreaRouterAbi, erc20Abi } from "./abi";
 
 // Load environment variables
 const CITREA_RPC_URL = process.env.CITREA_RPC_URL || "https://rpc.testnet.citrea.xyz";
@@ -19,6 +19,9 @@ const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || "3", 10);
 const RETRY_DELAY_MS = parseInt(process.env.RETRY_DELAY_MS || "1000", 10);
 const API_PORT = parseInt(process.env.API_PORT || "3000", 10);
 const API_HOST = process.env.API_HOST || "localhost";
+const INCLUDE_EVENTS = (process.env.INCLUDE_EVENTS || "false").toLowerCase() === "true";
+const EVENTS_LIMIT = parseInt(process.env.EVENTS_LIMIT || "10", 10);
+const RECENT_SWAPS_LIMIT = parseInt(process.env.RECENT_SWAPS_LIMIT || "10", 10);
 
 const CITREA_TESTNET = defineChain({
 	id: CITREA_CHAIN_ID,
@@ -55,7 +58,7 @@ interface TokenPairDetail {
 interface EnhancedMetrics {
 	uniqueUsers: number;
 	uniqueTxCount: number;
-	totalGas_cBTC: string;
+	totalFees_cBTC: string;
 	totalSwaps: number;
 	volumeByToken: {
 		inbound: Array<TokenVolume>;
@@ -63,8 +66,24 @@ interface EnhancedMetrics {
 	};
 	topCallers: Array<{ addr: string; count: number }>;
 	topTokenPairs: Array<TokenPairDetail>;
-	dailyStats: Array<{ day: string; tx: number; uniqueUsers: number; swaps: number }>;
-	swapEvents: Array<SwapEventData>;
+	dailyStats: Array<{
+		day: string;
+		tx: number;
+		uniqueUsers: number;
+		swaps: number;
+		fees_cBTC: string;
+	}>;
+	recentSwaps: Array<{
+		tx_hash: string;
+		time: string;
+		sender: string;
+		tokenIn: string;
+		tokenOut: string;
+		amountIn: string;
+		amountOut: string;
+	}>;
+	swapEvents?: Array<SwapEventData>;
+	range: { firstBlock: number | null; lastBlock: number | null; lastUpdatedAt: string | null };
 }
 
 // Initialize database with events table
@@ -100,6 +119,20 @@ function initDatabase(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_timestamp ON logs(timestamp);
     CREATE INDEX IF NOT EXISTS idx_token_pair ON swap_events(token_in, token_out);
     CREATE INDEX IF NOT EXISTS idx_sender ON swap_events(sender);
+
+    CREATE TABLE IF NOT EXISTS fees (
+      tx_hash TEXT PRIMARY KEY,
+      fee_wei TEXT NOT NULL,
+      FOREIGN KEY(tx_hash) REFERENCES logs(tx_hash)
+    );
+    CREATE INDEX IF NOT EXISTS idx_fee_tx_hash ON fees(tx_hash);
+
+    CREATE TABLE IF NOT EXISTS token_metadata (
+      address TEXT PRIMARY KEY,
+      decimals INTEGER NOT NULL,
+      symbol TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_token_metadata_address ON token_metadata(address);
     
     CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
@@ -192,6 +225,11 @@ async function scanLogs(
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
+	const insertFee = db.prepare(`
+    INSERT OR IGNORE INTO fees (tx_hash, fee_wei)
+    VALUES (?, ?)
+  `);
+
 	let currentBlock = startBlock;
 	let totalLogs = 0;
 	let totalSwaps = 0;
@@ -218,6 +256,16 @@ async function scanLogs(
 							receipt.gasUsed.toString(),
 							Number(block.timestamp)
 						);
+
+						try {
+							const feeWei =
+								receipt.gasUsed *
+								(receipt as unknown as { effectiveGasPrice: bigint })
+									.effectiveGasPrice;
+							insertFee.run(log.transactionHash!, feeWei.toString());
+						} catch {
+							// If effectiveGasPrice is unavailable due to custom formatter, skip fee insert
+						}
 
 						// Decode Swap events
 						try {
@@ -251,7 +299,8 @@ async function scanLogs(
 				totalLogs += logs.length;
 			}
 
-			const progress = Number(((endBlock - startBlock) * 100n) / (latestBlock - startBlock));
+			const denom = latestBlock - startBlock;
+			const progress = denom === 0n ? 100 : Number(((endBlock - startBlock) * 100n) / denom);
 			console.log(
 				`  Block ${endBlock.toLocaleString()} | ${logs.length} logs | ${totalSwaps} swaps | ${progress.toFixed(1)}% complete`
 			);
@@ -267,66 +316,353 @@ async function scanLogs(
 	console.log(`\n✓ Scan complete! Indexed ${totalLogs} transactions, ${totalSwaps} swap events`);
 }
 
-function calculateEnhancedMetrics(db: Database.Database): EnhancedMetrics {
+function formatWeiToCbtc(wei: bigint, fractionDigits = 6): string {
+	const base = 10n ** 18n;
+	const integer = wei / base;
+	const fraction = wei % base;
+	const fracStr = fraction.toString().padStart(18, "0").slice(0, fractionDigits);
+	return `${integer.toString()}.${fracStr}`;
+}
+
+function sanitizeDecimals(dec: number | bigint): number {
+	const n = Number(dec);
+	if (!Number.isFinite(n) || n <= 0 || n > 36) return 18;
+	return n;
+}
+
+async function backfillFees(
+	db: Database.Database,
+	client: ReturnType<typeof createCitreaClient>,
+	batch = 500,
+	concurrency = 10
+): Promise<{ processed: number; inserted: number }> {
+	const countMissingStmt = db.prepare(
+		`SELECT COUNT(*) AS cnt
+         FROM logs l
+         LEFT JOIN fees f ON l.tx_hash = f.tx_hash
+         WHERE f.tx_hash IS NULL`
+	);
+	const totalMissingRow = countMissingStmt.get() as { cnt: number } | undefined;
+	const totalMissing = totalMissingRow?.cnt ?? 0;
+	if (totalMissing === 0) return { processed: 0, inserted: 0 };
+
+	const selectMissing = db.prepare(
+		`SELECT l.tx_hash AS tx_hash
+         FROM logs l
+         LEFT JOIN fees f ON l.tx_hash = f.tx_hash
+         WHERE f.tx_hash IS NULL
+         ORDER BY l.block_number ASC
+         LIMIT ?`
+	);
+	const insertFeeLocal = db.prepare(`
+        INSERT OR IGNORE INTO fees (tx_hash, fee_wei)
+        VALUES (?, ?)
+    `);
+
+	let processed = 0;
+	let inserted = 0;
+
+	while (true) {
+		const rows = selectMissing.all(batch) as Array<{ tx_hash: string }>;
+		if (rows.length === 0) break;
+
+		// Process in chunks to limit concurrency
+		for (let i = 0; i < rows.length; i += concurrency) {
+			const chunk = rows.slice(i, i + concurrency);
+			await Promise.all(
+				chunk.map(async ({ tx_hash }) => {
+					try {
+						const receipt = await client.getTransactionReceipt({
+							hash: tx_hash as `0x${string}`,
+						});
+						const eff = (receipt as unknown as { effectiveGasPrice: bigint })
+							.effectiveGasPrice;
+						const feeWei = receipt.gasUsed * eff;
+						insertFeeLocal.run(tx_hash, feeWei.toString());
+						inserted++;
+					} catch {
+						// Skip if receipt not available or effectiveGasPrice missing
+					} finally {
+						processed++;
+					}
+				})
+			);
+		}
+
+		const percent = Math.min(100, (processed / totalMissing) * 100).toFixed(1);
+		console.log(
+			`  Backfill ${processed}/${totalMissing} | ${inserted} inserted | ${percent}% complete`
+		);
+		if (rows.length < batch) break;
+	}
+
+	return { processed, inserted };
+}
+
+async function backfillSwapEvents(
+	db: Database.Database,
+	client: ReturnType<typeof createCitreaClient>,
+	batch = 500,
+	concurrency = 10
+): Promise<{ processed: number; inserted: number }> {
+	const countMissingStmt = db.prepare(
+		`SELECT COUNT(*) AS cnt
+         FROM logs l
+         LEFT JOIN swap_events s ON l.tx_hash = s.tx_hash
+         WHERE s.tx_hash IS NULL`
+	);
+	const totalMissingRow = countMissingStmt.get() as { cnt: number } | undefined;
+	const totalMissing = totalMissingRow?.cnt ?? 0;
+	if (totalMissing === 0) return { processed: 0, inserted: 0 };
+
+	const selectMissing = db.prepare(
+		`SELECT l.tx_hash AS tx_hash
+         FROM logs l
+         LEFT JOIN swap_events s ON l.tx_hash = s.tx_hash
+         WHERE s.tx_hash IS NULL
+         ORDER BY l.block_number ASC
+         LIMIT ?`
+	);
+	const insertSwapLocal = db.prepare(`
+        INSERT OR IGNORE INTO swap_events 
+        (tx_hash, block_number, sender, amount_in, amount_out, token_in, token_out, destination, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+	let processed = 0;
+	let inserted = 0;
+
+	while (true) {
+		const rows = selectMissing.all(batch) as Array<{ tx_hash: string }>;
+		if (rows.length === 0) break;
+
+		for (let i = 0; i < rows.length; i += concurrency) {
+			const chunk = rows.slice(i, i + concurrency);
+			await Promise.all(
+				chunk.map(async ({ tx_hash }) => {
+					try {
+						const receipt = await client.getTransactionReceipt({
+							hash: tx_hash as `0x${string}`,
+						});
+						// decode logs in receipt
+						for (const recLog of receipt.logs ?? []) {
+							try {
+								const decoded = decodeEventLog({
+									abi: citreaRouterAbi,
+									data: recLog.data,
+									topics: recLog.topics,
+								});
+								if (decoded.eventName === "Swap") {
+									const args = decoded.args as unknown as {
+										sender: string;
+										amount_in: bigint;
+										amount_out: bigint;
+										token_in: string;
+										token_out: string;
+										destination: string;
+									};
+									const block = await client.getBlock({
+										blockNumber: receipt.blockNumber!,
+									});
+									insertSwapLocal.run(
+										tx_hash,
+										Number(receipt.blockNumber!),
+										args.sender.toLowerCase(),
+										args.amount_in.toString(),
+										args.amount_out.toString(),
+										args.token_in.toLowerCase(),
+										args.token_out.toLowerCase(),
+										args.destination.toLowerCase(),
+										Number(block.timestamp)
+									);
+									inserted++;
+								}
+							} catch {
+								// not a Swap event; continue
+							}
+						}
+					} catch {
+						// skip on errors
+					} finally {
+						processed++;
+					}
+				})
+			);
+		}
+
+		const percent = Math.min(100, (processed / totalMissing) * 100).toFixed(1);
+		console.log(
+			`  Backfill(events) ${processed}/${totalMissing} | ${inserted} inserted | ${percent}% complete`
+		);
+
+		if (rows.length < batch) break;
+	}
+
+	return { processed, inserted };
+}
+
+async function backfillTokenMetadata(
+	db: Database.Database,
+	client: ReturnType<typeof createCitreaClient>,
+	batch = 200,
+	concurrency = 10
+): Promise<{ processed: number; inserted: number }> {
+	const selectMissingTokens = db.prepare(
+		`WITH tokens AS (
+            SELECT DISTINCT token_in AS address FROM swap_events
+            UNION
+            SELECT DISTINCT token_out AS address FROM swap_events
+        )
+        SELECT t.address AS address
+        FROM tokens t
+        LEFT JOIN token_metadata m ON t.address = m.address
+        WHERE m.address IS NULL
+        LIMIT ?`
+	);
+	const insertMeta = db.prepare(
+		`INSERT OR IGNORE INTO token_metadata (address, decimals, symbol) VALUES (?, ?, ?)`
+	);
+
+	let processed = 0;
+	let inserted = 0;
+
+	while (true) {
+		const rows = selectMissingTokens.all(batch) as Array<{ address: string }>;
+		if (rows.length === 0) break;
+
+		for (let i = 0; i < rows.length; i += concurrency) {
+			const chunk = rows.slice(i, i + concurrency);
+			await Promise.all(
+				chunk.map(async ({ address }) => {
+					try {
+						let decimals = await client.readContract({
+							address: address as Address,
+							abi: erc20Abi,
+							functionName: "decimals",
+						});
+						let symbol = "";
+						try {
+							symbol = await client.readContract({
+								address: address as Address,
+								abi: erc20Abi,
+								functionName: "symbol",
+							});
+						} catch {
+							symbol = "UNKNOWN";
+						}
+						const symUpper = symbol.toUpperCase();
+						let decSan = sanitizeDecimals(decimals);
+						if (symUpper === "USDC") decSan = 6;
+						else if (symUpper === "USDT") decSan = 6;
+						else if (symUpper === "WBTC") decSan = 8;
+						else if (symUpper === "WETH") decSan = 18;
+						insertMeta.run(address.toLowerCase(), decSan, symbol);
+						inserted++;
+					} catch {
+						insertMeta.run(address.toLowerCase(), 18, "UNKNOWN");
+						inserted++;
+					} finally {
+						processed++;
+					}
+				})
+			);
+		}
+
+		console.log(`  Backfill(tokens) processed ${processed} | inserted ${inserted}`);
+		if (rows.length < batch) break;
+	}
+
+	return { processed, inserted };
+}
+
+function formatAmount(amount: bigint, decimals: number, fractionDigits = 6): string {
+	const base = 10n ** BigInt(decimals);
+	const integer = amount / base;
+	const fraction = amount % base;
+	const fracStr = fraction.toString().padStart(decimals, "0").slice(0, fractionDigits);
+	return `${integer.toString()}.${fracStr}`;
+}
+
+function calculateEnhancedMetrics(
+	db: Database.Database,
+	options?: { includeEvents?: boolean; eventsLimit?: number; recentLimit?: number }
+): EnhancedMetrics {
 	const uniqueUsers = db
 		.prepare("SELECT COUNT(DISTINCT from_address) as count FROM logs")
 		.get() as { count: number };
 	const uniqueTxCount = db.prepare("SELECT COUNT(*) as count FROM logs").get() as {
 		count: number;
 	};
-	const totalGasRow = db
-		.prepare("SELECT SUM(CAST(gas_used AS REAL)) as total FROM logs")
-		.get() as { total: number };
-	const totalGas_cBTC = (totalGasRow.total / 1e18).toFixed(4);
+
+	let totalFeesWei = 0n;
+	try {
+		const feeRows = db.prepare("SELECT fee_wei FROM fees").all() as Array<{ fee_wei: string }>;
+		for (const row of feeRows) {
+			totalFeesWei += BigInt(row.fee_wei);
+		}
+	} catch {
+		// fees table might not exist yet; keep totalFeesWei as 0n
+	}
+	const totalFees_cBTC = formatWeiToCbtc(totalFeesWei, 6);
 
 	const totalSwaps = db.prepare("SELECT COUNT(*) as count FROM swap_events").get() as {
 		count: number;
 	};
 
-	// Volume by token (inbound) - separated by token, ordered by swap count
-	const volumeInByToken = db
-		.prepare(
-			`
-    SELECT 
-      token_in as token,
-      SUM(CAST(amount_in AS REAL)) as total,
-      COUNT(*) as count
-    FROM swap_events
-    GROUP BY token_in
-    ORDER BY count DESC
-  `
-		)
-		.all() as Array<{ token: string; total: number; count: number }>;
+	const inboundRows = db
+		.prepare("SELECT token_in as token, amount_in FROM swap_events")
+		.all() as Array<{ token: string; amount_in: string }>;
+	const inboundMap = new Map<string, { sum: bigint; count: number }>();
+	for (const r of inboundRows) {
+		const key = r.token.toLowerCase();
+		const cur = inboundMap.get(key) ?? { sum: 0n, count: 0 };
+		inboundMap.set(key, { sum: cur.sum + BigInt(r.amount_in), count: cur.count + 1 });
+	}
+	const volumeInByToken = Array.from(inboundMap.entries())
+		.map(([token, { sum, count }]) => ({ token, total: sum, count }))
+		.sort((a, b) => b.count - a.count);
 
-	// Volume by token (outbound) - separated by token, ordered by swap count
-	const volumeOutByToken = db
-		.prepare(
-			`
-    SELECT 
-      token_out as token,
-      SUM(CAST(amount_out AS REAL)) as total,
-      COUNT(*) as count
-    FROM swap_events
-    GROUP BY token_out
-    ORDER BY count DESC
-  `
-		)
-		.all() as Array<{ token: string; total: number; count: number }>;
+	const outboundRows = db
+		.prepare("SELECT token_out as token, amount_out FROM swap_events")
+		.all() as Array<{ token: string; amount_out: string }>;
+	const outboundMap = new Map<string, { sum: bigint; count: number }>();
+	for (const r of outboundRows) {
+		const key = r.token.toLowerCase();
+		const cur = outboundMap.get(key) ?? { sum: 0n, count: 0 };
+		outboundMap.set(key, { sum: cur.sum + BigInt(r.amount_out), count: cur.count + 1 });
+	}
+	const volumeOutByToken = Array.from(outboundMap.entries())
+		.map(([token, { sum, count }]) => ({ token, total: sum, count }))
+		.sort((a, b) => b.count - a.count);
 
 	// Convert to readable format with proper decimals
+	const metaRows = db
+		.prepare("SELECT address, decimals, symbol FROM token_metadata")
+		.all() as Array<{ address: string; decimals: number; symbol: string }>;
+	const decimalsMap = new Map(metaRows.map((m) => [m.address.toLowerCase(), m.decimals]));
+	const symbolMap = new Map(metaRows.map((m) => [m.address.toLowerCase(), m.symbol]));
+
 	const volumeByToken = {
-		inbound: volumeInByToken.map((v) => ({
-			token: v.token,
-			totalAmount: v.total.toFixed(0),
-			normalizedAmount: `${(v.total / 1e18).toFixed(6)} (assuming 18 decimals)`,
-			swapCount: v.count,
-		})),
-		outbound: volumeOutByToken.map((v) => ({
-			token: v.token,
-			totalAmount: v.total.toFixed(0),
-			normalizedAmount: `${(v.total / 1e18).toFixed(6)} (assuming 18 decimals)`,
-			swapCount: v.count,
-		})),
+		inbound: volumeInByToken.map((v) => {
+			const dec = decimalsMap.get(v.token.toLowerCase()) ?? 18;
+			const sym = symbolMap.get(v.token.toLowerCase()) ?? "";
+			return {
+				token: v.token,
+				totalAmount: v.total.toString(),
+				normalizedAmount: `${formatAmount(v.total, dec, 6)}${sym ? ` (${sym})` : ""}`,
+				swapCount: v.count,
+			};
+		}),
+		outbound: volumeOutByToken.map((v) => {
+			const dec = decimalsMap.get(v.token.toLowerCase()) ?? 18;
+			const sym = symbolMap.get(v.token.toLowerCase()) ?? "";
+			return {
+				token: v.token,
+				totalAmount: v.total.toString(),
+				normalizedAmount: `${formatAmount(v.total, dec, 6)}${sym ? ` (${sym})` : ""}`,
+				swapCount: v.count,
+			};
+		}),
 	};
 
 	const topCallers = db
@@ -341,39 +677,68 @@ function calculateEnhancedMetrics(db: Database.Database): EnhancedMetrics {
 		)
 		.all() as Array<{ addr: string; count: number }>;
 
-	// Token pairs with separate in/out volumes
-	const topTokenPairsData = db
-		.prepare(
-			`
-    SELECT 
-      token_in,
-      token_out,
-      COUNT(*) as count,
-      SUM(CAST(amount_in AS REAL)) as volume_in,
-      SUM(CAST(amount_out AS REAL)) as volume_out
-    FROM swap_events
-    GROUP BY token_in, token_out
-    ORDER BY count DESC
-    LIMIT 10
-  `
-		)
+	const pairRows = db
+		.prepare("SELECT token_in, token_out, amount_in, amount_out FROM swap_events")
 		.all() as Array<{
 		token_in: string;
 		token_out: string;
-		count: number;
-		volume_in: number;
-		volume_out: number;
+		amount_in: string;
+		amount_out: string;
 	}>;
+	const pairMap = new Map<
+		string,
+		{ token_in: string; token_out: string; count: number; volIn: bigint; volOut: bigint }
+	>();
+	for (const r of pairRows) {
+		const key = `${r.token_in.toLowerCase()}|${r.token_out.toLowerCase()}`;
+		const cur = pairMap.get(key) ?? {
+			token_in: r.token_in,
+			token_out: r.token_out,
+			count: 0,
+			volIn: 0n,
+			volOut: 0n,
+		};
+		cur.count += 1;
+		cur.volIn += BigInt(r.amount_in);
+		cur.volOut += BigInt(r.amount_out);
+		pairMap.set(key, cur);
+	}
+	const topTokenPairs = Array.from(pairMap.values())
+		.sort((a, b) => b.count - a.count)
+		.slice(0, 10)
+		.map((p) => {
+			const decIn = decimalsMap.get(p.token_in.toLowerCase()) ?? 18;
+			const decOut = decimalsMap.get(p.token_out.toLowerCase()) ?? 18;
+			const symIn = symbolMap.get(p.token_in.toLowerCase()) ?? "";
+			const symOut = symbolMap.get(p.token_out.toLowerCase()) ?? "";
+			return {
+				tokenIn: p.token_in,
+				tokenOut: p.token_out,
+				swapCount: p.count,
+				volumeIn: `${formatAmount(p.volIn, decIn, 6)} (${symIn || p.token_in.slice(0, 8)}...)`,
+				volumeOut: `${formatAmount(p.volOut, decOut, 6)} (${symOut || p.token_out.slice(0, 8)}...)`,
+			};
+		});
 
-	const topTokenPairs = topTokenPairsData.map((p) => ({
-		tokenIn: p.token_in,
-		tokenOut: p.token_out,
-		swapCount: p.count,
-		volumeIn: `${(p.volume_in / 1e18).toFixed(6)} (${p.token_in.slice(0, 8)}...)`,
-		volumeOut: `${(p.volume_out / 1e18).toFixed(6)} (${p.token_out.slice(0, 8)}...)`,
-	}));
+	const feeDailyRows = db
+		.prepare(
+			`
+    SELECT 
+      strftime('%Y-%m-%d', l.timestamp, 'unixepoch') as day,
+      f.fee_wei as fee_wei
+    FROM fees f
+    JOIN logs l ON l.tx_hash = f.tx_hash
+  `
+		)
+		.all() as Array<{ day: string; fee_wei: string }>;
 
-	const dailyStats = db
+	const feesByDayMap = new Map<string, bigint>();
+	for (const row of feeDailyRows) {
+		const prev = feesByDayMap.get(row.day) ?? 0n;
+		feesByDayMap.set(row.day, prev + BigInt(row.fee_wei));
+	}
+
+	const dailyStatsRows = db
 		.prepare(
 			`
     SELECT 
@@ -389,27 +754,90 @@ function calculateEnhancedMetrics(db: Database.Database): EnhancedMetrics {
 		)
 		.all() as Array<{ day: string; tx: number; uniqueUsers: number; swaps: number }>;
 
-	const swapEvents = db
-		.prepare(
-			`
+	const dailyStats = dailyStatsRows.map((r) => ({
+		...r,
+		fees_cBTC: formatWeiToCbtc(feesByDayMap.get(r.day) ?? 0n, 6),
+	}));
+
+	const blockRangeRow = db
+		.prepare("SELECT MIN(block_number) as first, MAX(block_number) as last FROM logs")
+		.get() as { first: number | null; last: number | null };
+	const lastTsRow = db.prepare("SELECT MAX(timestamp) as last_ts FROM logs").get() as {
+		last_ts: number | null;
+	};
+	const range = {
+		firstBlock: blockRangeRow?.first ?? null,
+		lastBlock: blockRangeRow?.last ?? null,
+		lastUpdatedAt: lastTsRow?.last_ts ? new Date(lastTsRow.last_ts * 1000).toISOString() : null,
+	};
+
+	const includeEvents = options?.includeEvents ?? false;
+	const eventsLimit = options?.eventsLimit ?? 10;
+	const recentLimit = options?.recentLimit ?? 10;
+
+	const swapEvents = includeEvents
+		? (db
+				.prepare(
+					`
     SELECT sender, amount_in, amount_out, token_in, token_out, destination
     FROM swap_events
     ORDER BY block_number DESC
-    LIMIT 100
+    LIMIT ?
+  `
+				)
+				.all(eventsLimit) as Array<SwapEventData>)
+		: undefined;
+
+	const recentRows = db
+		.prepare(
+			`
+    SELECT tx_hash, timestamp, sender, amount_in, amount_out, token_in, token_out
+    FROM swap_events
+    ORDER BY block_number DESC
+    LIMIT ?
   `
 		)
-		.all() as Array<SwapEventData>;
+		.all(recentLimit) as Array<{
+		tx_hash: string;
+		timestamp: number;
+		sender: string;
+		amount_in: string;
+		amount_out: string;
+		token_in: string;
+		token_out: string;
+	}>;
+
+	const recentSwaps = recentRows.map((r) => {
+		const decIn = decimalsMap.get(r.token_in.toLowerCase()) ?? 18;
+		const decOut = decimalsMap.get(r.token_out.toLowerCase()) ?? 18;
+		const symIn = symbolMap.get(r.token_in.toLowerCase()) ?? "";
+		const symOut = symbolMap.get(r.token_out.toLowerCase()) ?? "";
+		const amountInNorm = `${formatAmount(BigInt(r.amount_in), decIn, 6)}${symIn ? ` (${symIn})` : ""}`;
+		const amountOutNorm = `${formatAmount(BigInt(r.amount_out), decOut, 6)}${symOut ? ` (${symOut})` : ""}`;
+		const time = new Date(r.timestamp * 1000).toISOString();
+		return {
+			tx_hash: r.tx_hash,
+			time,
+			sender: r.sender,
+			tokenIn: r.token_in,
+			tokenOut: r.token_out,
+			amountIn: amountInNorm,
+			amountOut: amountOutNorm,
+		};
+	});
 
 	return {
 		uniqueUsers: uniqueUsers.count,
 		uniqueTxCount: uniqueTxCount.count,
-		totalGas_cBTC,
+		totalFees_cBTC,
 		totalSwaps: totalSwaps.count,
 		volumeByToken,
 		topCallers,
 		topTokenPairs,
 		dailyStats,
-		swapEvents,
+		recentSwaps,
+		...(includeEvents && swapEvents ? { swapEvents } : {}),
+		range,
 	};
 }
 
@@ -417,7 +845,11 @@ function startServer(db: Database.Database, port = API_PORT): void {
 	const server = createServer((req, res) => {
 		if (req.url === "/metrics" && req.method === "GET") {
 			try {
-				const metrics = calculateEnhancedMetrics(db);
+				const metrics = calculateEnhancedMetrics(db, {
+					includeEvents: INCLUDE_EVENTS,
+					eventsLimit: EVENTS_LIMIT,
+					recentLimit: RECENT_SWAPS_LIMIT,
+				});
 				res.writeHead(200, { "Content-Type": "application/json" });
 				res.end(JSON.stringify(metrics, null, 2));
 			} catch (error) {
@@ -435,9 +867,25 @@ function startServer(db: Database.Database, port = API_PORT): void {
 	});
 }
 
-function parseArgs(): { address: Address; incremental: boolean; serve: boolean; export?: string } {
+function parseArgs(): {
+	address: Address;
+	incremental: boolean;
+	serve: boolean;
+	export?: string;
+	includeEvents?: boolean;
+	eventsLimit?: number;
+	recentLimit?: number;
+} {
 	const args = process.argv.slice(2);
-	const parsed: { address: Address; incremental: boolean; serve: boolean; export?: string } = {
+	const parsed: {
+		address: Address;
+		incremental: boolean;
+		serve: boolean;
+		export?: string;
+		includeEvents?: boolean;
+		eventsLimit?: number;
+		recentLimit?: number;
+	} = {
 		address: DEFAULT_CONTRACT,
 		incremental: false,
 		serve: false,
@@ -458,6 +906,15 @@ function parseArgs(): { address: Address; incremental: boolean; serve: boolean; 
 			i++;
 		} else if (arg === "--export" && nextArg) {
 			parsed.export = nextArg;
+			i++;
+		} else if (arg === "--includeEvents" && nextArg) {
+			parsed.includeEvents = nextArg.toLowerCase() === "true";
+			i++;
+		} else if (arg === "--eventsLimit" && nextArg) {
+			parsed.eventsLimit = parseInt(nextArg, 10);
+			i++;
+		} else if (arg === "--recentLimit" && nextArg) {
+			parsed.recentLimit = parseInt(nextArg, 10);
 			i++;
 		}
 	}
@@ -482,12 +939,34 @@ async function main() {
 	try {
 		await scanLogs(db, client, args.address, args.incremental);
 
-		const metrics = calculateEnhancedMetrics(db);
+		const { processed: pFees, inserted: iFees } = await backfillFees(db, client);
+		if (pFees > 0) {
+			console.log(`\n🧮 Fee backfill complete: ${iFees}/${pFees} inserted`);
+		}
+
+		const { processed: pEvents, inserted: iEvents } = await backfillSwapEvents(db, client);
+		if (pEvents > 0) {
+			console.log(`🧩 Event backfill complete: ${iEvents}/${pEvents} inserted`);
+		}
+
+		const { processed: pTokens, inserted: iTokens } = await backfillTokenMetadata(db, client);
+		if (pTokens > 0) {
+			console.log(`🏷️  Token metadata backfill: ${iTokens}/${pTokens} inserted`);
+		}
+
+		const includeEventsOpt = args.includeEvents ?? INCLUDE_EVENTS;
+		const eventsLimitOpt = args.eventsLimit ?? EVENTS_LIMIT;
+		const recentLimitOpt = args.recentLimit ?? RECENT_SWAPS_LIMIT;
+		const metrics = calculateEnhancedMetrics(db, {
+			includeEvents: includeEventsOpt,
+			eventsLimit: eventsLimitOpt,
+			recentLimit: recentLimitOpt,
+		});
 		console.log("\n📈 Analytics Summary:");
 		console.log(`  Unique Users: ${metrics.uniqueUsers.toLocaleString()}`);
 		console.log(`  Total Transactions: ${metrics.uniqueTxCount.toLocaleString()}`);
 		console.log(`  Total Swaps: ${metrics.totalSwaps.toLocaleString()}`);
-		console.log(`  Total Gas: ${metrics.totalGas_cBTC} cBTC`);
+		console.log(`  Total Fees: ${metrics.totalFees_cBTC} cBTC`);
 		console.log(`\n  📊 Volume by Token (Top 3 Inbound):`);
 		metrics.volumeByToken.inbound.slice(0, 3).forEach((v, i) => {
 			console.log(`    ${i + 1}. ${v.token.slice(0, 10)}...`);

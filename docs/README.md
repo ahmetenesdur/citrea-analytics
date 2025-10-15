@@ -114,7 +114,10 @@ Learn how incremental scanning works, database structure, and maintenance.
 - ✅ HTTP API server
 - ✅ JSON export functionality
 - ✅ Event decoding and analysis
+- ✅ Real fee metrics (totalFees_cBTC) and daily fees (dailyStats.fees_cBTC)
+- ✅ Token-aware normalization using ERC20 decimals & symbols
+- ✅ Recent swaps summary (recentSwaps) and optional raw events (swapEvents)
 
 ---
 
-**Last Updated**: 2025-10-13
+**Last Updated**: 2025-10-16

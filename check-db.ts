@@ -45,6 +45,24 @@ try {
 	console.log(`  Total Swap Events: ${swapCount.count.toLocaleString()}`);
 	console.log(`  Unique Users: ${uniqueUsers.count.toLocaleString()}`);
 
+	// Total fees (wei→cBTC) if fees table exists
+	const feesTable = db
+		.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='fees'")
+		.get() as { name: string } | undefined;
+	if (feesTable?.name) {
+		const feeRows = db.prepare("SELECT fee_wei FROM fees").all() as Array<{ fee_wei: string }>;
+		let totalFeesWei = 0n;
+		for (const row of feeRows) totalFeesWei += BigInt(row.fee_wei);
+		const totalFeesCBTC = (() => {
+			const base = 10n ** 18n;
+			const integer = totalFeesWei / base;
+			const fraction = totalFeesWei % base;
+			const fracStr = fraction.toString().padStart(18, "0").slice(0, 6);
+			return `${integer.toString()}.${fracStr}`;
+		})();
+		console.log(`  Total Fees: ${totalFeesCBTC} cBTC`);
+	}
+
 	// Block range
 	const blockRange = db
 		.prepare(

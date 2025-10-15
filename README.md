@@ -7,6 +7,8 @@ Analyze smart contract activity on Citrea Testnet with SQLite caching and increm
 - **Incremental Scanning** - Only scans new blocks since last run
 - **SQLite Cache** - Persistent storage with WAL mode
 - **Event Decoding** - Decode and analyze Swap events
+- **Real Fee Metrics** - Total and daily fees (cBTC)
+- **Recent Swaps** - Compact summary of latest N swaps
 - **Auto Retry** - Automatic retry for RPC failures
 - **HTTP API** - RESTful metrics endpoint
 - **JSON Export** - Export analytics to file
@@ -97,8 +99,9 @@ pnpm start -- --incremental true --serve true --export report.json
 {
   "uniqueUsers": 29326,
   "uniqueTxCount": 137368,
-  "totalGas_cBTC": "0.0000",
+  "totalFees_cBTC": "123.456789",
   "totalSwaps": 137365,
+  "range": {"firstBlock": 1234567, "lastBlock": 16850000, "lastUpdatedAt": "2025-10-15T16:59:34.000Z"},
   "volumeByToken": {
     "inbound": [
       {"token": "0x8d0c...", "normalizedAmount": "232.43", "swapCount": 47920}
@@ -115,8 +118,8 @@ pnpm start -- --incremental true --serve true --export report.json
       "volumeOut": "0.000046 (0x36c1...)"
     }
   ],
-  "dailyStats": [{"day": "2025-10-13", "tx": 577, "uniqueUsers": 360, "swaps": 577}],
-  "swapEvents": [{"sender": "0x...", "amount_in": "100...", "token_in": "0x...", ...}]
+"dailyStats": [{"day": "2025-10-13", "tx": 577, "uniqueUsers": 360, "swaps": 577, "fees_cBTC": "0.123456"}],
+  "recentSwaps": [{"tx_hash": "0x...", "amountIn": "0.001000 (WCBTC)", "amountOut": "6.522482 (USDC)", "time": "2025-10-15T16:59:34.000Z"}]
 }
 ```
 
