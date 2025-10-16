@@ -534,42 +534,95 @@ async function backfillTokenMetadata(
 		const rows = selectMissingTokens.all(batch) as Array<{ address: string }>;
 		if (rows.length === 0) break;
 
-		for (let i = 0; i < rows.length; i += concurrency) {
-			const chunk = rows.slice(i, i + concurrency);
-			await Promise.all(
-				chunk.map(async ({ address }) => {
+		const tokens = rows.map((r) => r.address as Address);
+
+		try {
+			const decCalls = tokens.map((address) => ({
+				address,
+				abi: erc20Abi,
+				functionName: "decimals" as const,
+			}));
+			const symCalls = tokens.map((address) => ({
+				address,
+				abi: erc20Abi,
+				functionName: "symbol" as const,
+			}));
+
+			const [decResults, symResults] = await Promise.all([
+				client.multicall({ contracts: decCalls, allowFailure: true }),
+				client.multicall({ contracts: symCalls, allowFailure: true }),
+			]);
+
+			for (let i = 0; i < tokens.length; i++) {
+				const address = tokens[i];
+				if (!address) {
+					processed++;
+					continue;
+				}
+				const decRes = decResults[i] as {
+					status: "success" | "failure";
+					result?: number | bigint;
+				};
+				const symRes = symResults[i] as { status: "success" | "failure"; result?: string };
+
+				let decimals: number | bigint = 18;
+				let symbol: string = "UNKNOWN";
+
+				if (decRes && decRes.status === "success" && decRes.result !== undefined) {
+					decimals = decRes.result as number | bigint;
+				}
+				if (symRes && symRes.status === "success" && symRes.result !== undefined) {
+					symbol = symRes.result as string;
+				}
+
+				const symUpper = symbol.toUpperCase();
+				let decSan = sanitizeDecimals(decimals);
+				if (symUpper === "USDC") decSan = 6;
+				else if (symUpper === "USDT") decSan = 6;
+				else if (symUpper === "WBTC") decSan = 8;
+				else if (symUpper === "WETH") decSan = 18;
+
+				insertMeta.run(address.toLowerCase(), decSan, symbol);
+				inserted++;
+				processed++;
+			}
+		} catch {
+			for (const addr of tokens) {
+				if (!addr) {
+					processed++;
+					continue;
+				}
+				try {
+					let decimals = await client.readContract({
+						address: addr as Address,
+						abi: erc20Abi,
+						functionName: "decimals",
+					});
+					let symbol = "";
 					try {
-						let decimals = await client.readContract({
-							address: address as Address,
+						symbol = await client.readContract({
+							address: addr as Address,
 							abi: erc20Abi,
-							functionName: "decimals",
+							functionName: "symbol",
 						});
-						let symbol = "";
-						try {
-							symbol = await client.readContract({
-								address: address as Address,
-								abi: erc20Abi,
-								functionName: "symbol",
-							});
-						} catch {
-							symbol = "UNKNOWN";
-						}
-						const symUpper = symbol.toUpperCase();
-						let decSan = sanitizeDecimals(decimals);
-						if (symUpper === "USDC") decSan = 6;
-						else if (symUpper === "USDT") decSan = 6;
-						else if (symUpper === "WBTC") decSan = 8;
-						else if (symUpper === "WETH") decSan = 18;
-						insertMeta.run(address.toLowerCase(), decSan, symbol);
-						inserted++;
 					} catch {
-						insertMeta.run(address.toLowerCase(), 18, "UNKNOWN");
-						inserted++;
-					} finally {
-						processed++;
+						symbol = "UNKNOWN";
 					}
-				})
-			);
+					const symUpper = symbol.toUpperCase();
+					let decSan = sanitizeDecimals(decimals);
+					if (symUpper === "USDC") decSan = 6;
+					else if (symUpper === "USDT") decSan = 6;
+					else if (symUpper === "WBTC") decSan = 8;
+					else if (symUpper === "WETH") decSan = 18;
+					insertMeta.run(addr.toLowerCase(), decSan, symbol);
+					inserted++;
+				} catch {
+					insertMeta.run(addr.toLowerCase(), 18, "UNKNOWN");
+					inserted++;
+				} finally {
+					processed++;
+				}
+			}
 		}
 
 		console.log(`  Backfill(tokens) processed ${processed} | inserted ${inserted}`);
