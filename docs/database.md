@@ -35,11 +35,15 @@ CREATE TABLE logs (
 
 Indexes: `block_number`, `from_address`, `timestamp`
 
-#### `swap_events` - Swap Event Details
+#### `swap_events` (v2) - Swap Event Details (Multi-Swap Support)
+
+Stores each Swap log individually, supporting multiple Swap events per transaction.
 
 ```sql
 CREATE TABLE swap_events (
-  tx_hash TEXT PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tx_hash TEXT NOT NULL,
+  log_index INTEGER NOT NULL,
   block_number INTEGER NOT NULL,
   sender TEXT NOT NULL,
   amount_in TEXT NOT NULL,
@@ -52,7 +56,7 @@ CREATE TABLE swap_events (
 );
 ```
 
-Indexes: `token_in, token_out`, `sender`
+Indexes: `UNIQUE(tx_hash, log_index)`, `token_in, token_out`, `sender`
 
 #### `fees` - Transaction Fee Records
 
@@ -103,31 +107,6 @@ pnpm scan
 1. Reads `lastScannedBlock` from database
 2. Scans only new blocks
 3. Updates `lastScannedBlock`
-
-### Example
-
-**First run:**
-
-```
-✓ Database initialized
-🔍 Scanning blocks 0 → 16,769,945
-✅ Scan complete! 1,234 transactions | 567 swaps
-```
-
-**Second run (3 days later):**
-
-```
-📊 Resuming from block 16,769,946
-🔍 Scanning blocks 16,769,946 → 16,850,000
-✅ Scan complete! 89 NEW transactions | 23 NEW swaps
-```
-
-**Third run (same day):**
-
-```
-📊 Resuming from block 16,850,001
-✓ Already up to date!
-```
 
 ## Database Commands
 
@@ -255,83 +234,11 @@ API Note: Daily fees (`fees_cBTC`) are merged into `dailyStats` items on the `/m
 **Event Backfill**
 
 - Decodes `Swap` events from receipts for `logs` missing `swap_events` records.
+- Each Swap log is stored separately using `log_index` (multi-swap per transaction).
 
 **Token Metadata Backfill**
 
 - Reads ERC20 `decimals` & `symbol` for tokens seen in `swap_events` and stores in `token_metadata`.
-
-## Troubleshooting
-
-### Database Locked
-
-**Problem:** Another process is using the database
-
-**Solution:**
-
-```bash
-pkill -f "tsx analyze"
-pnpm start
-```
-
-### Database Corrupted
-
-**Problem:** Process interrupted or disk full
-
-**Solution:**
-
-```bash
-pnpm db:reset
-pnpm start
-```
-
-### Table Not Found
-
-**Problem:** Database file exists but tables missing
-
-**Solution:**
-
-```bash
-rm citrea_cache.db
-pnpm start
-```
-
-### Slow Scanning
-
-**Problem:** RPC rate limits or network issues
-
-**Solution:**
-
-Edit `.env`:
-
-```bash
-BATCH_SIZE=500
-MAX_RETRIES=5
-RETRY_DELAY_MS=2000
-```
-
-### Database Too Large
-
-**Problem:** Database exceeds 100MB
-
-**Solution 1 - Optimize:**
-
-```bash
-sqlite3 citrea_cache.db "VACUUM;"
-```
-
-**Solution 2 - Clean old data:**
-
-```sql
--- Delete data older than 30 days
-DELETE FROM swap_events
-WHERE timestamp < strftime('%s', 'now') - (86400 * 30);
-
-DELETE FROM logs
-WHERE timestamp < strftime('%s', 'now') - (86400 * 30);
-
--- Optimize
-VACUUM;
-```
 
 ## Best Practices
 
@@ -375,25 +282,3 @@ watch -n 60 'ls -lh citrea_cache.db'
 pnpm serve &
 curl http://localhost:3000/metrics | jq
 ```
-
-## Summary
-
-**How It Works:**
-
-1. First run → Scan from block 0, save checkpoint
-2. Incremental run → Resume from checkpoint, scan only new blocks
-3. Already current → Skip scanning
-
-**Key Points:**
-
-- Data is never deleted, only appended
-- `lastScannedBlock` updated after each scan
-- WAL mode allows multiple readers
-- Indexes enable fast queries
-
-**Commands:**
-
-- `pnpm start` → Full enhanced scan
-- `pnpm scan` → Incremental scan
-- `pnpm db:check` → Check status
-- `pnpm db:reset` → Reset database

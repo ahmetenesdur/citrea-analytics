@@ -138,6 +138,44 @@ ORDER BY swap_count DESC
 LIMIT 10;
 ```
 
+## Event-Level vs Tx-Level Counts
+
+By default, some summaries count swaps at the transaction level (distinct tx). With multi-swap support, you may prefer event-level counts.
+
+### Daily swaps (tx-level)
+
+```sql
+SELECT
+  strftime('%Y-%m-%d', l.timestamp, 'unixepoch') AS day,
+  COUNT(DISTINCT s.tx_hash) AS swaps
+FROM logs l
+LEFT JOIN swap_events s ON l.tx_hash = s.tx_hash
+GROUP BY day
+ORDER BY day DESC
+LIMIT 30;
+```
+
+### Daily swaps (event-level)
+
+```sql
+SELECT
+  strftime('%Y-%m-%d', s.timestamp, 'unixepoch') AS day,
+  COUNT(*) AS swaps
+FROM swap_events s
+GROUP BY day
+ORDER BY day DESC
+LIMIT 30;
+```
+
+### Recent swaps ordering (with multi-swap)
+
+```sql
+SELECT tx_hash, timestamp, sender, amount_in, amount_out, token_in, token_out
+FROM swap_events
+ORDER BY block_number DESC, log_index DESC
+LIMIT 20;
+```
+
 ## API Usage
 
 ### Get Metrics
@@ -201,36 +239,3 @@ BATCH_SIZE=500
 # Faster but may hit RPC limits
 BATCH_SIZE=2000
 ```
-
-## Troubleshooting
-
-### Database Issues
-
-```bash
-# Reset database
-rm citrea_cache.db citrea_cache.db-*
-pnpm start
-```
-
-### Dependency Issues
-
-```bash
-# Reinstall dependencies
-rm -rf node_modules pnpm-lock.yaml
-pnpm install
-```
-
-### RPC Connection Issues
-
-```bash
-# Test RPC manually
-curl -X POST $CITREA_RPC_URL \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
-```
-
-## Next Steps
-
-- [Database Guide](database.md) - Database structure and management
-- [Configuration](configuration.md) - Environment variables
-- [Architecture](architecture.md) - System design

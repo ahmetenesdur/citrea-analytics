@@ -129,50 +129,6 @@ API_HOST=localhost
 - `localhost` - Local access only (recommended)
 - `0.0.0.0` - Accept external connections
 
-## Configuration Examples
-
-### Development (Fast Scanning)
-
-```bash
-CITREA_RPC_URL=https://rpc.testnet.citrea.xyz
-CITREA_CHAIN_ID=5115
-CONTRACT_ADDRESS=0x72B1fC6b54733250F4e18dA4A20Bb2DCbC598556
-DATABASE_FILE=citrea_cache.db
-BATCH_SIZE=2000
-MAX_RETRIES=3
-RETRY_DELAY_MS=500
-API_PORT=3000
-API_HOST=localhost
-```
-
-### Production (Stable)
-
-```bash
-CITREA_RPC_URL=https://rpc.testnet.citrea.xyz
-CITREA_CHAIN_ID=5115
-CONTRACT_ADDRESS=0x72B1fC6b54733250F4e18dA4A20Bb2DCbC598556
-DATABASE_FILE=/var/lib/citrea-analytics/citrea_cache.db
-BATCH_SIZE=1000
-MAX_RETRIES=5
-RETRY_DELAY_MS=2000
-API_PORT=8080
-API_HOST=0.0.0.0
-```
-
-### Low-Resource Server
-
-```bash
-CITREA_RPC_URL=https://rpc.testnet.citrea.xyz
-CITREA_CHAIN_ID=5115
-CONTRACT_ADDRESS=0x72B1fC6b54733250F4e18dA4A20Bb2DCbC598556
-DATABASE_FILE=citrea_cache.db
-BATCH_SIZE=500
-MAX_RETRIES=3
-RETRY_DELAY_MS=3000
-API_PORT=3000
-API_HOST=localhost
-```
-
 ### Output & Summaries
 
 #### INCLUDE_EVENTS
@@ -205,11 +161,11 @@ EVENTS_LIMIT=10
 RECENT_SWAPS_LIMIT=10
 ```
 
-## Notes for New Metrics
+### Multicall for Token Metadata
 
-- No additional environment variables are required for `totalFees_cBTC` or daily fees (`dailyStats.fees_cBTC`).
-- Token normalization uses on-chain ERC20 metadata; common tokens (USDC/USDT/WBTC/WETH) apply known decimals heuristics for robustness.
-- Raw events are optional via `INCLUDE_EVENTS`/`EVENTS_LIMIT`; summarized `recentSwaps` count is controlled by `RECENT_SWAPS_LIMIT`.
+- Token metadata backfill retrieves ERC20 `decimals` and `symbol` using batched multicall.
+- No extra configuration is required; multicall is enabled by default and improves performance.
+- If multicall is unavailable or fails (RPC/provider constraint), the application automatically falls back to individual calls per token.
 
 ## CLI Parameter Override
 
@@ -236,55 +192,6 @@ pnpm start -- --incremental true --serve true
 1. CLI parameters (highest)
 2. Environment variables
 3. Hardcoded defaults (lowest)
-
-## Troubleshooting
-
-### Changes Not Taking Effect
-
-**Problem:** `.env` changes ignored
-
-**Solution:** Restart the application
-
-```bash
-# Stop (Ctrl+C) and restart
-pnpm start
-```
-
-### Module Not Found
-
-**Problem:** `Cannot find module 'dotenv'`
-
-**Solution:** Install dependencies
-
-```bash
-pnpm install
-```
-
-### RPC Connection Errors
-
-**Problem:** Cannot connect to RPC
-
-**Solution:** Verify RPC URL
-
-```bash
-curl -X POST $CITREA_RPC_URL \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
-```
-
-### Port Already in Use
-
-**Problem:** API server won't start
-
-**Solution:** Change port or kill existing process
-
-```bash
-# Find process on port 3000
-lsof -i :3000
-
-# Change port in .env
-API_PORT=8080
-```
 
 ## Security Best Practices
 

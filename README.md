@@ -14,6 +14,12 @@ Analyze smart contract activity on Citrea Testnet with SQLite caching and increm
 - **JSON Export** - Export analytics to file
 - **TypeScript** - Full type safety with ESM
 
+### New/Enhanced
+
+- **Multi-Swap Event Support** — Stores multiple Swap logs per transaction via `log_index` (accurate counts & volumes for multi-hop).
+- **Token Metadata via Multicall** — Batched ERC20 `decimals` and `symbol` retrieval with automatic fallback to single calls.
+- **Clear Backfill Logs** — Explicit summary of swaps inserted and transactions containing Swap events.
+
 ## Quick Start
 
 ```bash

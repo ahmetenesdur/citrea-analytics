@@ -101,24 +101,9 @@ function initDatabase(): Database.Database {
       timestamp INTEGER NOT NULL
     );
     
-    CREATE TABLE IF NOT EXISTS swap_events (
-      tx_hash TEXT PRIMARY KEY,
-      block_number INTEGER NOT NULL,
-      sender TEXT NOT NULL,
-      amount_in TEXT NOT NULL,
-      amount_out TEXT NOT NULL,
-      token_in TEXT NOT NULL,
-      token_out TEXT NOT NULL,
-      destination TEXT NOT NULL,
-      timestamp INTEGER NOT NULL,
-      FOREIGN KEY(tx_hash) REFERENCES logs(tx_hash)
-    );
-    
     CREATE INDEX IF NOT EXISTS idx_block_number ON logs(block_number);
     CREATE INDEX IF NOT EXISTS idx_from_address ON logs(from_address);
     CREATE INDEX IF NOT EXISTS idx_timestamp ON logs(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_token_pair ON swap_events(token_in, token_out);
-    CREATE INDEX IF NOT EXISTS idx_sender ON swap_events(sender);
 
     CREATE TABLE IF NOT EXISTS fees (
       tx_hash TEXT PRIMARY KEY,
@@ -139,6 +124,69 @@ function initDatabase(): Database.Database {
       value TEXT NOT NULL
     );
   `);
+
+	// Migration: if legacy swap_events without log_index exists, migrate to v2
+	try {
+		const cols = db.prepare("PRAGMA table_info(swap_events)").all() as Array<{ name: string }>;
+		const tableExists = cols.length > 0;
+		const hasLogIndex = cols.some((c) => c.name.toLowerCase() === "log_index");
+		const hasId = cols.some((c) => c.name.toLowerCase() === "id");
+		if (!tableExists) {
+			// Fresh create v2 schema
+			db.exec(`
+            CREATE TABLE IF NOT EXISTS swap_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              tx_hash TEXT NOT NULL,
+              log_index INTEGER NOT NULL,
+              block_number INTEGER NOT NULL,
+              sender TEXT NOT NULL,
+              amount_in TEXT NOT NULL,
+              amount_out TEXT NOT NULL,
+              token_in TEXT NOT NULL,
+              token_out TEXT NOT NULL,
+              destination TEXT NOT NULL,
+              timestamp INTEGER NOT NULL,
+              FOREIGN KEY(tx_hash) REFERENCES logs(tx_hash)
+            );
+            `);
+		} else if (!hasLogIndex || !hasId) {
+			db.exec(`
+            CREATE TABLE IF NOT EXISTS swap_events_v2 (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              tx_hash TEXT NOT NULL,
+              log_index INTEGER NOT NULL,
+              block_number INTEGER NOT NULL,
+              sender TEXT NOT NULL,
+              amount_in TEXT NOT NULL,
+              amount_out TEXT NOT NULL,
+              token_in TEXT NOT NULL,
+              token_out TEXT NOT NULL,
+              destination TEXT NOT NULL,
+              timestamp INTEGER NOT NULL,
+              FOREIGN KEY(tx_hash) REFERENCES logs(tx_hash)
+            );
+            `);
+			// Copy legacy data with log_index=0 default
+			try {
+				db.exec(`
+                  INSERT INTO swap_events_v2 (tx_hash, log_index, block_number, sender, amount_in, amount_out, token_in, token_out, destination, timestamp)
+                  SELECT tx_hash, 0 as log_index, block_number, sender, amount_in, amount_out, token_in, token_out, destination, timestamp
+                  FROM swap_events;
+                `);
+			} catch {}
+			// Replace table
+			db.exec(`
+              DROP TABLE IF EXISTS swap_events;
+              ALTER TABLE swap_events_v2 RENAME TO swap_events;
+            `);
+		}
+		// Ensure indexes exist on the final swap_events schema
+		db.exec(`
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_swap_tx_log ON swap_events(tx_hash, log_index);
+          CREATE INDEX IF NOT EXISTS idx_token_pair ON swap_events(token_in, token_out);
+          CREATE INDEX IF NOT EXISTS idx_sender ON swap_events(sender);
+        `);
+	} catch {}
 
 	console.log("✓ Database initialized with event decoding support");
 	return db;
@@ -221,8 +269,8 @@ async function scanLogs(
 
 	const insertSwap = db.prepare(`
     INSERT OR IGNORE INTO swap_events 
-    (tx_hash, block_number, sender, amount_in, amount_out, token_in, token_out, destination, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (tx_hash, log_index, block_number, sender, amount_in, amount_out, token_in, token_out, destination, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
 	const insertFee = db.prepare(`
@@ -279,6 +327,7 @@ async function scanLogs(
 								const args = decoded.args as unknown as SwapEventData;
 								insertSwap.run(
 									log.transactionHash!,
+									typeof log.logIndex !== "undefined" ? Number(log.logIndex) : 0,
 									Number(log.blockNumber!),
 									args.sender.toLowerCase(),
 									args.amount_in.toString(),
@@ -425,8 +474,8 @@ async function backfillSwapEvents(
 	);
 	const insertSwapLocal = db.prepare(`
         INSERT OR IGNORE INTO swap_events 
-        (tx_hash, block_number, sender, amount_in, amount_out, token_in, token_out, destination, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (tx_hash, log_index, block_number, sender, amount_in, amount_out, token_in, token_out, destination, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
 	let processed = 0;
@@ -468,6 +517,9 @@ async function backfillSwapEvents(
 									});
 									insertSwapLocal.run(
 										tx_hash,
+										typeof recLog.logIndex !== "undefined"
+											? Number(recLog.logIndex)
+											: 0,
 										Number(receipt.blockNumber!),
 										args.sender.toLowerCase(),
 										args.amount_in.toString(),

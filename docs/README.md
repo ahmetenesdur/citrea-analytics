@@ -8,7 +8,7 @@ Complete documentation for Citrea Analytics.
 
 - **[../README.md](../README.md)** - Main project README and quick start
 - **[usage.md](usage.md)** - Detailed usage examples and CLI options
-- **[database.md](database.md)** - Database structure and incremental scanning ⭐
+- **[database.md](database.md)** - Database structure and incremental scanning
 - **[configuration.md](configuration.md)** - Environment variables and settings
 
 ---
@@ -47,7 +47,7 @@ Complete documentation for Citrea Analytics.
 
 ---
 
-### 3. database.md ⭐
+### 3. database.md
 
 **Location**: `docs/database.md`  
 **Purpose**: Complete database management guide
@@ -78,32 +78,9 @@ Complete documentation for Citrea Analytics.
 
 ---
 
-## Getting Help
-
-### For Quick Start
-
-→ Read [../README.md](../README.md)
-
-### For CLI Usage and Workflows
-
-→ Read [usage.md](usage.md)
-
-### For Database Management ⭐
-
-→ Read [database.md](database.md)  
-Learn how incremental scanning works, database structure, and maintenance.
-
-### For Configuration Issues
-
-→ Read [configuration.md](configuration.md)
-
----
-
 ## Version History
 
 ### Current Version: 1.0.0
-
-**Author**: Ahmet Enes Dur (ahmetenesdur@gmail.com)
 
 **Features**:
 
@@ -117,6 +94,8 @@ Learn how incremental scanning works, database structure, and maintenance.
 - ✅ Real fee metrics (totalFees_cBTC) and daily fees (dailyStats.fees_cBTC)
 - ✅ Token-aware normalization using ERC20 decimals & symbols
 - ✅ Recent swaps summary (recentSwaps) and optional raw events (swapEvents)
+- ✅ Multi-swap event support (per-transaction `log_index`, accurate counts & volumes)
+- ✅ Token metadata multicall (batched `decimals`/`symbol` with automatic fallback)
 
 ---
 
