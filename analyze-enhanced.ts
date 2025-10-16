@@ -404,7 +404,7 @@ async function backfillSwapEvents(
 	client: ReturnType<typeof createCitreaClient>,
 	batch = 500,
 	concurrency = 10
-): Promise<{ processed: number; inserted: number }> {
+): Promise<{ processed: number; inserted: number; txWithSwap: number }> {
 	const countMissingStmt = db.prepare(
 		`SELECT COUNT(*) AS cnt
          FROM logs l
@@ -413,7 +413,7 @@ async function backfillSwapEvents(
 	);
 	const totalMissingRow = countMissingStmt.get() as { cnt: number } | undefined;
 	const totalMissing = totalMissingRow?.cnt ?? 0;
-	if (totalMissing === 0) return { processed: 0, inserted: 0 };
+	if (totalMissing === 0) return { processed: 0, inserted: 0, txWithSwap: 0 };
 
 	const selectMissing = db.prepare(
 		`SELECT l.tx_hash AS tx_hash
@@ -431,6 +431,7 @@ async function backfillSwapEvents(
 
 	let processed = 0;
 	let inserted = 0;
+	let txWithSwap = 0;
 
 	while (true) {
 		const rows = selectMissing.all(batch) as Array<{ tx_hash: string }>;
@@ -445,6 +446,7 @@ async function backfillSwapEvents(
 							hash: tx_hash as `0x${string}`,
 						});
 						// decode logs in receipt
+						let foundSwapForTx = false;
 						for (const recLog of receipt.logs ?? []) {
 							try {
 								const decoded = decodeEventLog({
@@ -476,11 +478,13 @@ async function backfillSwapEvents(
 										Number(block.timestamp)
 									);
 									inserted++;
+									foundSwapForTx = true;
 								}
 							} catch {
 								// not a Swap event; continue
 							}
 						}
+						if (foundSwapForTx) txWithSwap++;
 					} catch {
 						// skip on errors
 					} finally {
@@ -492,13 +496,13 @@ async function backfillSwapEvents(
 
 		const percent = Math.min(100, (processed / totalMissing) * 100).toFixed(1);
 		console.log(
-			`  Backfill(events) ${processed}/${totalMissing} | ${inserted} inserted | ${percent}% complete`
+			`  Backfill(events) ${processed}/${totalMissing} | swaps inserted: ${inserted} | tx with swaps: ${txWithSwap} | ${percent}% complete`
 		);
 
 		if (rows.length < batch) break;
 	}
 
-	return { processed, inserted };
+	return { processed, inserted, txWithSwap };
 }
 
 async function backfillTokenMetadata(
@@ -944,9 +948,21 @@ async function main() {
 			console.log(`\n🧮 Fee backfill complete: ${iFees}/${pFees} inserted`);
 		}
 
-		const { processed: pEvents, inserted: iEvents } = await backfillSwapEvents(db, client);
+		const {
+			processed: pEvents,
+			inserted: iEvents,
+			txWithSwap,
+		} = await backfillSwapEvents(db, client);
 		if (pEvents > 0) {
-			console.log(`🧩 Event backfill complete: ${iEvents}/${pEvents} inserted`);
+			if (iEvents === 0) {
+				console.log(
+					`🧩 Event backfill complete: ${iEvents}/${pEvents} inserted — no Swap events found in missing transactions (tx with swaps: ${txWithSwap}/${pEvents}).`
+				);
+			} else {
+				console.log(
+					`🧩 Event backfill complete: ${iEvents}/${pEvents} inserted (${txWithSwap} tx contained Swap events).`
+				);
+			}
 		}
 
 		const { processed: pTokens, inserted: iTokens } = await backfillTokenMetadata(db, client);
