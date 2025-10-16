@@ -16,7 +16,7 @@ Analyze smart contract activity on Citrea Testnet with SQLite caching and increm
 
 ### New/Enhanced
 
-- **Multi-Swap Event Support** — Stores multiple Swap logs per transaction via `log_index` (accurate counts & volumes for multi-hop).
+- **Multi-Swap Event Support** — Stores multiple Swap logs per transaction via `log_index`.
 - **Token Metadata via Multicall** — Batched ERC20 `decimals` and `symbol` retrieval with automatic fallback to single calls.
 - **Clear Backfill Logs** — Explicit summary of swaps inserted and transactions containing Swap events.
 
@@ -124,7 +124,14 @@ pnpm start -- --incremental true --serve true --export report.json
       "volumeOut": "0.000046 (0x36c1...)"
     }
   ],
-"dailyStats": [{"day": "2025-10-13", "tx": 577, "uniqueUsers": 360, "swaps": 577, "fees_cBTC": "0.123456"}],
+  "dailyStats": [{
+    "day": "2025-10-13",
+    "tx": 577,
+    "uniqueUsers": 360,
+    "swapsTx": 577,
+    "swapsEvent": 580,
+    "fees_cBTC": "0.123456"
+  }],
   "recentSwaps": [{"tx_hash": "0x...", "amountIn": "0.001000 (WCBTC)", "amountOut": "6.522482 (USDC)", "time": "2025-10-15T16:59:34.000Z"}]
 }
 ```

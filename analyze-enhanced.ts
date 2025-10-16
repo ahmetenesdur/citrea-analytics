@@ -70,7 +70,8 @@ interface EnhancedMetrics {
 		day: string;
 		tx: number;
 		uniqueUsers: number;
-		swaps: number;
+		swapsTx: number;
+		swapsEvent: number;
 		fees_cBTC: string;
 	}>;
 	recentSwaps: Array<{
@@ -863,8 +864,27 @@ function calculateEnhancedMetrics(
 		)
 		.all() as Array<{ day: string; tx: number; uniqueUsers: number; swaps: number }>;
 
+	// Event-level daily stats (counts Swap events per day)
+	const dailyStatsEventRows = db
+		.prepare(
+			`SELECT strftime('%Y-%m-%d', s.timestamp, 'unixepoch') AS day,
+                    COUNT(*) AS swapsEvent
+             FROM swap_events s
+             GROUP BY day
+             ORDER BY day DESC
+             LIMIT 30`
+		)
+		.all() as Array<{ day: string; swapsEvent: number }>;
+	const dailyEventMap = new Map<string, number>(
+		dailyStatsEventRows.map((r) => [r.day, r.swapsEvent ?? 0])
+	);
+
 	const dailyStats = dailyStatsRows.map((r) => ({
-		...r,
+		day: r.day,
+		tx: r.tx,
+		uniqueUsers: r.uniqueUsers,
+		swapsTx: r.swaps,
+		swapsEvent: dailyEventMap.get(r.day) ?? 0,
 		fees_cBTC: formatWeiToCbtc(feesByDayMap.get(r.day) ?? 0n, 6),
 	}));
 
@@ -890,7 +910,7 @@ function calculateEnhancedMetrics(
 					`
     SELECT sender, amount_in, amount_out, token_in, token_out, destination
     FROM swap_events
-    ORDER BY block_number DESC
+    ORDER BY block_number DESC, log_index DESC
     LIMIT ?
   `
 				)
@@ -902,7 +922,7 @@ function calculateEnhancedMetrics(
 			`
     SELECT tx_hash, timestamp, sender, amount_in, amount_out, token_in, token_out
     FROM swap_events
-    ORDER BY block_number DESC
+    ORDER BY block_number DESC, log_index DESC
     LIMIT ?
   `
 		)

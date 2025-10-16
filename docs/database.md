@@ -223,8 +223,6 @@ LIMIT 30;
 
 Application code should aggregate with BigInt for exact results.
 
-API Note: Daily fees (`fees_cBTC`) are merged into `dailyStats` items on the `/metrics` response for convenience.
-
 ## Backfill Process
 
 **Fees Backfill**

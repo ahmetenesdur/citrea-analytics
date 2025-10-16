@@ -96,6 +96,7 @@ Complete documentation for Citrea Analytics.
 - ✅ Recent swaps summary (recentSwaps) and optional raw events (swapEvents)
 - ✅ Multi-swap event support (per-transaction `log_index`, accurate counts & volumes)
 - ✅ Token metadata multicall (batched `decimals`/`symbol` with automatic fallback)
+- ✅ Daily stats include both tx-level (`swapsTx`) and event-level (`swapsEvent`) counts
 
 ---
 
