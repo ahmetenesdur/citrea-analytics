@@ -825,8 +825,8 @@ function calculateEnhancedMetrics(
 				tokenIn: p.token_in,
 				tokenOut: p.token_out,
 				swapCount: p.count,
-				volumeIn: `${formatAmount(p.volIn, decIn, 6)} (${symIn || p.token_in.slice(0, 8)}...)`,
-				volumeOut: `${formatAmount(p.volOut, decOut, 6)} (${symOut || p.token_out.slice(0, 8)}...)`,
+				volumeIn: `${formatAmount(p.volIn, decIn, 6)} (${symIn ? symIn : `${p.token_in.slice(0, 8)}...`})`,
+				volumeOut: `${formatAmount(p.volOut, decOut, 6)} (${symOut ? symOut : `${p.token_out.slice(0, 8)}...`})`,
 			};
 		});
 
