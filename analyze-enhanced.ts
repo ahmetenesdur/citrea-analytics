@@ -235,7 +235,11 @@ async function fetchLogsWithRetry(
 	}
 }
 
-async function scanLogs(
+/**
+ * Scan contract logs incrementally and store in database
+ * Supports event decoding, fee calculation, and swap event extraction
+ */
+export async function scanLogs(
 	db: Database.Database,
 	client: ReturnType<typeof createCitreaClient>,
 	address: Address,
@@ -291,62 +295,113 @@ async function scanLogs(
 			const logs = await fetchLogsWithRetry(client, address, currentBlock, endBlock);
 
 			if (logs.length > 0) {
-				await Promise.all(
+				const logData = await Promise.all(
 					logs.map(async (log) => {
-						const [receipt, block] = await Promise.all([
-							client.getTransactionReceipt({ hash: log.transactionHash! }),
-							client.getBlock({ blockNumber: log.blockNumber! }),
-						]);
-
-						insertLog.run(
-							log.transactionHash!,
-							Number(log.blockNumber!),
-							receipt.from.toLowerCase(),
-							receipt.gasUsed.toString(),
-							Number(block.timestamp)
-						);
-
 						try {
+							const [receipt, block] = await Promise.all([
+								client.getTransactionReceipt({ hash: log.transactionHash! }),
+								client.getBlock({ blockNumber: log.blockNumber! }),
+							]);
+
 							const feeWei =
 								receipt.gasUsed *
 								(receipt as unknown as { effectiveGasPrice: bigint })
 									.effectiveGasPrice;
-							insertFee.run(log.transactionHash!, feeWei.toString());
-						} catch {
-							// If effectiveGasPrice is unavailable due to custom formatter, skip fee insert
-						}
+							const feeData = {
+								tx_hash: log.transactionHash!,
+								fee_wei: feeWei.toString(),
+							};
 
-						// Decode Swap events
-						try {
-							const decoded = decodeEventLog({
-								abi: citreaRouterAbi,
-								data: log.data,
-								topics: log.topics,
-							});
-
-							if (decoded.eventName === "Swap") {
-								const args = decoded.args as unknown as SwapEventData;
-								insertSwap.run(
-									log.transactionHash!,
-									typeof log.logIndex !== "undefined" ? Number(log.logIndex) : 0,
-									Number(log.blockNumber!),
-									args.sender.toLowerCase(),
-									args.amount_in.toString(),
-									args.amount_out.toString(),
-									args.token_in.toLowerCase(),
-									args.token_out.toLowerCase(),
-									args.destination.toLowerCase(),
-									Number(block.timestamp)
-								);
-								totalSwaps++;
+							const decodedSwaps = [];
+							if (log.address.toLowerCase() === address.toLowerCase()) {
+								try {
+									const decoded = decodeEventLog({
+										abi: citreaRouterAbi,
+										data: log.data,
+										topics: log.topics,
+									});
+									if (decoded.eventName === "Swap") {
+										const args = decoded.args as unknown as SwapEventData;
+										decodedSwaps.push({
+											tx_hash: log.transactionHash!,
+											log_index:
+												typeof log.logIndex !== "undefined"
+													? Number(log.logIndex)
+													: 0,
+											block_number: Number(log.blockNumber!),
+											sender: args.sender.toLowerCase(),
+											amount_in: args.amount_in.toString(),
+											amount_out: args.amount_out.toString(),
+											token_in: args.token_in.toLowerCase(),
+											token_out: args.token_out.toLowerCase(),
+											destination: args.destination.toLowerCase(),
+											timestamp: Number(block.timestamp),
+										});
+									}
+								} catch {
+									/* Not a swap event or decoding failed */
+								}
 							}
-						} catch {
-							// Not a Swap event or decoding failed
+
+							return {
+								log: {
+									tx_hash: log.transactionHash!,
+									block_number: Number(log.blockNumber!),
+									from_address: receipt.from.toLowerCase(),
+									gas_used: receipt.gasUsed.toString(),
+									timestamp: Number(block.timestamp),
+								},
+								fee: feeData,
+								swaps: decodedSwaps,
+							};
+						} catch (e) {
+							console.warn(
+								`⚠ Could not process log for ${log.transactionHash!}:`,
+								(e as Error).message
+							);
+							return null;
 						}
 					})
 				);
 
-				totalLogs += logs.length;
+				const validData = logData.filter((d) => d !== null);
+
+				if (validData.length > 0) {
+					const insertMany = db.transaction((data) => {
+						for (const item of data) {
+							if (item) {
+								insertLog.run(
+									item.log.tx_hash,
+									item.log.block_number,
+									item.log.from_address,
+									item.log.gas_used,
+									item.log.timestamp
+								);
+								if (item.fee) {
+									insertFee.run(item.fee.tx_hash, item.fee.fee_wei);
+								}
+								for (const swap of item.swaps) {
+									insertSwap.run(
+										swap.tx_hash,
+										swap.log_index,
+										swap.block_number,
+										swap.sender,
+										swap.amount_in,
+										swap.amount_out,
+										swap.token_in,
+										swap.token_out,
+										swap.destination,
+										swap.timestamp
+									);
+									totalSwaps++;
+								}
+							}
+						}
+					});
+
+					insertMany(validData);
+					totalLogs += validData.length;
+				}
 			}
 
 			const denom = latestBlock - startBlock;

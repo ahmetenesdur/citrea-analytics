@@ -155,7 +155,7 @@ async function fetchLogsWithRetry(
 /**
  * Scan contract logs incrementally and store in database
  */
-async function scanLogs(
+export async function scanLogs(
 	db: Database.Database,
 	client: ReturnType<typeof createCitreaClient>,
 	address: Address,
@@ -199,48 +199,53 @@ async function scanLogs(
 			const logs = await fetchLogsWithRetry(client, address, currentBlock, endBlock);
 
 			if (logs.length > 0) {
-				// Batch insert within transaction
-				const insertMany = db.transaction((logEntries: Log[]) => {
-					for (const log of logEntries) {
-						// Fetch transaction receipt for gas and sender info
-						client
-							.getTransactionReceipt({ hash: log.transactionHash! })
-							.then((receipt) => {
-								client.getBlock({ blockNumber: log.blockNumber! }).then((block) => {
-									insertStmt.run(
-										log.transactionHash!,
-										Number(log.blockNumber!),
-										receipt.from.toLowerCase(),
-										receipt.gasUsed.toString(),
-										Number(block.timestamp)
-									);
-								});
-							});
-					}
-				});
-
-				// Wait for all receipts to be fetched
-				await Promise.all(
+				const logData = await Promise.all(
 					logs.map(async (log) => {
-						const receipt = await client.getTransactionReceipt({
-							hash: log.transactionHash!,
-						});
-						const block = await client.getBlock({ blockNumber: log.blockNumber! });
-						insertStmt.run(
-							log.transactionHash!,
-							Number(log.blockNumber!),
-							receipt.from.toLowerCase(),
-							receipt.gasUsed.toString(),
-							Number(block.timestamp)
-						);
+						try {
+							const [receipt, block] = await Promise.all([
+								client.getTransactionReceipt({ hash: log.transactionHash! }),
+								client.getBlock({ blockNumber: log.blockNumber! }),
+							]);
+							return {
+								tx_hash: log.transactionHash!,
+								block_number: Number(log.blockNumber!),
+								from_address: receipt.from.toLowerCase(),
+								gas_used: receipt.gasUsed.toString(),
+								timestamp: Number(block.timestamp),
+							};
+						} catch (e) {
+							console.warn(
+								`⚠ Could not process log for ${log.transactionHash!}:`,
+								(e as Error).message
+							);
+							return null;
+						}
 					})
 				);
 
-				totalLogs += logs.length;
+				const validLogData = logData.filter((d) => d !== null) as LogRow[];
+
+				if (validLogData.length > 0) {
+					const insertMany = db.transaction((logs: LogRow[]) => {
+						for (const log of logs) {
+							insertStmt.run(
+								log.tx_hash,
+								log.block_number,
+								log.from_address,
+								log.gas_used,
+								log.timestamp
+							);
+						}
+					});
+
+					insertMany(validLogData);
+					totalLogs += validLogData.length;
+				}
 			}
 
 			// Update progress
-			const progress = Number(((endBlock - startBlock) * 100n) / (latestBlock - startBlock));
+			const denom = latestBlock - startBlock;
+			const progress = denom === 0n ? 100 : Number(((endBlock - startBlock) * 100n) / denom);
 			console.log(
 				`  Block ${endBlock.toLocaleString()} | ${logs.length} logs | ${progress.toFixed(1)}% complete`
 			);
