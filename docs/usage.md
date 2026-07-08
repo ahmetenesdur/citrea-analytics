@@ -82,6 +82,35 @@ View statistics, database size, and record counts.
 pnpm db:check
 ```
 
+### Indexer Error Lifecycle
+
+List open indexer errors for the default Citrea database:
+
+```bash
+pnpm errors:list -- --status open --limit 25
+```
+
+Use `--network monad` to inspect the Monad database instead:
+
+```bash
+pnpm errors:list -- --network monad --status open
+```
+
+Mark errors as handled after investigation:
+
+```bash
+pnpm errors:resolve -- <error-id>
+pnpm errors:ignore -- <error-id>
+```
+
+Lifecycle semantics:
+
+- `open`: active error that still needs attention.
+- `resolved`: investigated and fixed/cleared.
+- `ignored`: accepted/no-action error.
+
+Repeated open errors are coalesced by stage/block/tx/item, incrementing `retry_count` and updating `last_seen_at` instead of creating duplicate rows.
+
 ### Development Reset
 
 Clear all locally cached SQLite databases to force a clean historical backfill on the next run.
@@ -92,7 +121,7 @@ pnpm db:reset && pnpm start
 
 ## API Usage
 
-The API server exposes 6 endpoints. Start with `pnpm serve` or `pnpm hybrid`.
+The API server exposes analytics and operational health endpoints. Start with `pnpm serve` or `pnpm hybrid`.
 
 ```bash
 # Full aggregated metrics
@@ -112,4 +141,10 @@ curl http://localhost:3000/metrics/wallet/0xf817...
 
 # System health & sync status
 curl http://localhost:3000/health
+
+# Open indexer errors
+curl "http://localhost:3000/health/errors?status=open&limit=25"
+
+# Recent scan runs
+curl "http://localhost:3000/health/runs?limit=25"
 ```

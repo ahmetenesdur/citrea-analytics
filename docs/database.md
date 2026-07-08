@@ -53,6 +53,36 @@ Metadata about tokens discovered during indexing.
 - `symbol` (TEXT): Human-readable ticker symbol.
 - `coingecko_id` (TEXT): Optional platform-specific CoinGecko REST scalar identifier.
 
+## Observability Tables
+
+### `scan_runs`
+
+Historical and incremental scan execution records.
+
+- `id` (INTEGER, PK): Scan run identifier.
+- `network` (TEXT): Network id, e.g. `citrea` or `monad`.
+- `mode` (TEXT): Scan mode, such as `full` or `incremental`.
+- `start_block` / `end_block` (INTEGER): Requested block range.
+- `status` (TEXT): `running`, `completed`, or `failed`.
+- `processed_logs` / `processed_swaps` (INTEGER): Run counters.
+- `error_count` (INTEGER): Number of associated indexer errors.
+- `error_message` (TEXT): Failure summary for failed runs.
+
+### `indexer_errors`
+
+Failure records for scan and backfill stages.
+
+- `run_id` (INTEGER, nullable FK): Related `scan_runs.id` when available.
+- `network` (TEXT): Network id.
+- `stage` (TEXT): Pipeline stage, e.g. `scan_range`, `fee_backfill`, `swap_event_backfill`, `token_metadata_backfill`.
+- `block_start` / `block_end` / `block_number` (INTEGER): Optional range or block context.
+- `tx_hash` (TEXT): Optional transaction hash context.
+- `item` (TEXT): Serialized fallback context when no transaction hash applies.
+- `error_message` / `error_stack` (TEXT): Captured error details.
+- `status` (TEXT): Lifecycle state: `open`, `resolved`, or `ignored`.
+- `retry_count` (INTEGER): Number of repeated sightings coalesced into the open error row.
+- `created_at` / `last_seen_at` (INTEGER): Unix timestamps for first and latest sightings.
+
 ## Useful SQL Queries
 
 **Top 5 Token Pairs by Volume**
@@ -93,4 +123,11 @@ pnpm db:check
 
 # Delete all data for all networks
 pnpm db:reset
+
+# List active indexer errors
+pnpm errors:list -- --status open
+
+# Mark an error as resolved or ignored
+pnpm errors:resolve -- <error-id>
+pnpm errors:ignore -- <error-id>
 ```

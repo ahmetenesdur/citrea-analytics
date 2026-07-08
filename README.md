@@ -14,8 +14,15 @@ Scope Analytics (Modular Edition) is an enterprise-grade, high-performance block
 
 - **Dynamic Pricing Oracle**: Token metadata and fiat mappings via CoinGecko are managed dynamically within the database layer, abstracting away hardcoded constraints.
 - **Comprehensive Volume Analysis**: Multi-token inbound and outbound liquidity tracking normalized to USD values.
+- **Precision-Safe Accounting**: Raw token amounts and fees are aggregated with `bigint`/fixed-scale helpers to avoid JavaScript `Number` precision loss.
 - **Execution Quality Engine**: Advanced slippage analysis comparing user-intended limits against actual execution pricing metrics.
 - **On-Chain User Profiling**: Precise tracking of unique active addresses, top interacting entities, and transaction frequency matrices.
+
+### Operations & Reliability
+
+- **Failure-Aware Indexing**: Backfill failures preserve item-level context instead of being silently swallowed.
+- **Indexer Observability**: `scan_runs` and `indexer_errors` tables track run status, open errors, retries, and last-seen timestamps.
+- **Operational Health API**: `/health`, `/health/errors`, and `/health/runs` expose sync status and recent indexer failures.
 
 ## Quick Start
 
@@ -62,6 +69,8 @@ The integrated server provides advanced analytics via a RESTful API.
 | `GET /metrics/pair/:tokenIn/:tokenOut` | Pair analytics, top traders, and daily stats               |
 | `GET /metrics/wallet/:address`         | Wallet profile: volume, pairs, token flow, activity        |
 | `GET /health`                          | System health, sync status, and uptime                     |
+| `GET /health/errors?status=&limit=`    | Indexer errors filtered by lifecycle status                |
+| `GET /health/runs?limit=`              | Recent historical/incremental scan runs                    |
 
 All endpoints return JSON with CORS headers (`Access-Control-Allow-Origin: *`).
 
@@ -91,13 +100,18 @@ All endpoints return JSON with CORS headers (`Access-Control-Allow-Origin: *`).
 
 ## Command Reference
 
-| Command           | Description                                  |
-| :---------------- | :------------------------------------------- |
-| `pnpm start`      | Interactive setup and launch.                |
-| `pnpm hybrid`     | Full sync: Backfill + Realtime + API Server. |
-| `pnpm realtime`   | WebSocket only (no historical scan).         |
-| `pnpm serve`      | API server with polling (incremental mode).  |
-| `pnpm export`     | Export metrics as JSON.                      |
-| `pnpm export:csv` | Export metrics as CSV (directory of files).  |
-| `pnpm export:md`  | Export metrics as a Markdown report.         |
-| `pnpm db:check`   | Integrity check and storage statistics.      |
+| Command                             | Description                                  |
+| :---------------------------------- | :------------------------------------------- |
+| `pnpm start`                        | Interactive setup and launch.                |
+| `pnpm hybrid`                       | Full sync: Backfill + Realtime + API Server. |
+| `pnpm realtime`                     | WebSocket only (no historical scan).         |
+| `pnpm serve`                        | API server with polling (incremental mode).  |
+| `pnpm export`                       | Export metrics as JSON.                      |
+| `pnpm export:csv`                   | Export metrics as CSV (directory of files).  |
+| `pnpm export:md`                    | Export metrics as a Markdown report.         |
+| `pnpm db:check`                     | Integrity check and storage statistics.      |
+| `pnpm errors:list -- --status open` | List indexer errors by lifecycle status.     |
+| `pnpm errors:resolve -- <id>`       | Mark an indexer error as resolved.           |
+| `pnpm errors:ignore -- <id>`        | Mark an indexer error as ignored.            |
+| `pnpm test`                         | Run the Node test suite.                     |
+| `pnpm type-check`                   | Run TypeScript type-checking.                |
