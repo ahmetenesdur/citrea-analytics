@@ -32,7 +32,9 @@ export function parseIntegerAmount(value: string | number | bigint | null | unde
 	return BigInt(trimmed);
 }
 
-export function sumIntegerAmounts(values: Iterable<string | number | bigint | null | undefined>): bigint {
+export function sumIntegerAmounts(
+	values: Iterable<string | number | bigint | null | undefined>
+): bigint {
 	let total = 0n;
 	for (const value of values) {
 		total += parseIntegerAmount(value);
@@ -85,5 +87,8 @@ export function formatUsdFromRawAmount(
 	priceUsd: number,
 	fractionDigits = 2
 ): string {
-	return formatScaledUsd(usdScaledFromRawAmount(rawAmount, decimals, priceUsd, fractionDigits), fractionDigits);
+	return formatScaledUsd(
+		usdScaledFromRawAmount(rawAmount, decimals, priceUsd, fractionDigits),
+		fractionDigits
+	);
 }

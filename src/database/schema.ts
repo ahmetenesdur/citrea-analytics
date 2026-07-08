@@ -41,7 +41,69 @@ export function createTables(db: Database.Database) {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS scan_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      network TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      start_block INTEGER,
+      end_block INTEGER,
+      status TEXT NOT NULL,
+      started_at INTEGER NOT NULL,
+      finished_at INTEGER,
+      processed_logs INTEGER NOT NULL DEFAULT 0,
+      processed_swaps INTEGER NOT NULL DEFAULT 0,
+      error_count INTEGER NOT NULL DEFAULT 0,
+      error_message TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_scan_runs_status ON scan_runs(status);
+    CREATE INDEX IF NOT EXISTS idx_scan_runs_started_at ON scan_runs(started_at);
+
+    CREATE TABLE IF NOT EXISTS indexer_errors (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER,
+      network TEXT,
+      stage TEXT NOT NULL,
+      block_start INTEGER,
+      block_end INTEGER,
+      block_number INTEGER,
+      tx_hash TEXT,
+      item TEXT,
+      error_message TEXT NOT NULL,
+      error_stack TEXT,
+      status TEXT NOT NULL DEFAULT 'open',
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      last_seen_at INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY(run_id) REFERENCES scan_runs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_indexer_errors_run_id ON indexer_errors(run_id);
+    CREATE INDEX IF NOT EXISTS idx_indexer_errors_stage ON indexer_errors(stage);
+    CREATE INDEX IF NOT EXISTS idx_indexer_errors_status ON indexer_errors(status);
+    CREATE INDEX IF NOT EXISTS idx_indexer_errors_created_at ON indexer_errors(created_at);
   `);
+
+	try {
+		const cols = db.prepare("PRAGMA table_info(indexer_errors)").all() as Array<{
+			name: string;
+		}>;
+		const hasColumn = (name: string) => cols.some((c) => c.name.toLowerCase() === name);
+		if (!hasColumn("status")) {
+			db.exec("ALTER TABLE indexer_errors ADD COLUMN status TEXT NOT NULL DEFAULT 'open';");
+		}
+		if (!hasColumn("retry_count")) {
+			db.exec(
+				"ALTER TABLE indexer_errors ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;"
+			);
+		}
+		if (!hasColumn("last_seen_at")) {
+			db.exec(
+				"ALTER TABLE indexer_errors ADD COLUMN last_seen_at INTEGER NOT NULL DEFAULT 0;"
+			);
+			db.exec("UPDATE indexer_errors SET last_seen_at = created_at WHERE last_seen_at = 0;");
+		}
+		db.exec("CREATE INDEX IF NOT EXISTS idx_indexer_errors_status ON indexer_errors(status);");
+	} catch {}
 
 	// Migration logic for swap_events
 	try {

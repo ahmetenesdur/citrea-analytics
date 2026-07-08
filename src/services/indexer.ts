@@ -14,6 +14,12 @@ import { erc20Abi, citreaRouterAbi } from "../config/abi";
 import { sanitizeDecimals } from "../utils/format";
 import { processInChunks } from "../utils/batch";
 import {
+	failScanRun,
+	finishScanRun,
+	recordIndexerError,
+	startScanRun,
+} from "./indexer-observability";
+import {
 	batchInsertLogs,
 	batchInsertFees,
 	batchInsertSwaps,
@@ -92,6 +98,12 @@ export async function scanLogs(
 	console.log(
 		`[Scanning] Scanning blocks ${startBlock.toLocaleString()} → ${latestBlock.toLocaleString()}`
 	);
+	const scanRunId = startScanRun(db, {
+		network: config.id,
+		mode: incremental ? "incremental" : "full",
+		startBlock,
+		endBlock: latestBlock,
+	});
 
 	const checkTxExists = db.prepare(`
     SELECT 
@@ -270,7 +282,15 @@ export async function scanLogs(
 								`[Warning] Could not process log for ${log.transactionHash!}:`,
 								(e as Error).message
 							);
-							return null;
+							recordIndexerError(db, {
+								runId: scanRunId,
+								network: config.id,
+								stage: "scan_log",
+								blockNumber: log.blockNumber,
+								txHash: log.transactionHash,
+								error: e,
+							});
+							throw e;
 						}
 					})
 				);
@@ -332,11 +352,21 @@ export async function scanLogs(
 			currentBlock = endBlock + 1n;
 		} catch (error) {
 			console.error(`[Error] Error scanning blocks ${currentBlock}-${endBlock}:`, error);
+			recordIndexerError(db, {
+				runId: scanRunId,
+				network: config.id,
+				stage: "scan_range",
+				blockStart: currentBlock,
+				blockEnd: endBlock,
+				error,
+			});
+			failScanRun(db, scanRunId, error);
 			throw error;
 		}
 	}
 
 	setMeta(db, "lastScannedBlock", latestBlock.toString());
+	finishScanRun(db, scanRunId, { processedLogs, processedSwaps });
 
 	const actualTxCount = db.prepare("SELECT COUNT(*) as count FROM logs").get() as {
 		count: number;
@@ -407,6 +437,15 @@ export async function backfillFees(
 			}
 		);
 		if (failed > 0) {
+			for (const failure of failures) {
+				recordIndexerError(db, {
+					network: config.id,
+					stage: "fee_backfill",
+					txHash: failure.item.tx_hash,
+					item: failure.item,
+					error: failure.error,
+				});
+			}
 			throw new Error(
 				`Fee backfill failed for ${failed} transaction(s); first failed tx: ${failures[0]?.item.tx_hash}`
 			);
@@ -463,53 +502,66 @@ export async function backfillSwapEvents(
 		const rows = selectMissing.all(batch) as Array<{ tx_hash: string }>;
 		if (rows.length === 0) break;
 
-		const { processed, failed, failures } = await processInChunks(rows, concurrency, async ({ tx_hash }) => {
-			const receipt = await client.getTransactionReceipt({
-				hash: tx_hash as `0x${string}`,
-			});
-			let foundSwapForTx = false;
-			for (const recLog of receipt.logs ?? []) {
-				try {
-					const decoded = decodeEventLog({
-						abi: config.abi,
-						data: recLog.data,
-						topics: recLog.topics,
-					});
-					if (decoded.eventName === "Swap") {
-						const args = decoded.args as unknown as {
-							sender: string;
-							amount_in: bigint;
-							amount_out: bigint;
-							token_in: string;
-							token_out: string;
-							destination: string;
-						};
-						const block = await client.getBlock({
-							blockNumber: receipt.blockNumber!,
+		const { processed, failed, failures } = await processInChunks(
+			rows,
+			concurrency,
+			async ({ tx_hash }) => {
+				const receipt = await client.getTransactionReceipt({
+					hash: tx_hash as `0x${string}`,
+				});
+				let foundSwapForTx = false;
+				for (const recLog of receipt.logs ?? []) {
+					try {
+						const decoded = decodeEventLog({
+							abi: config.abi,
+							data: recLog.data,
+							topics: recLog.topics,
 						});
-						insertSwap(db, {
-							tx_hash,
-							log_index:
-								typeof recLog.logIndex !== "undefined"
-									? Number(recLog.logIndex)
-									: 0,
-							block_number: Number(receipt.blockNumber!),
-							sender: args.sender.toLowerCase(),
-							amount_in: args.amount_in.toString(),
-							amount_out: args.amount_out.toString(),
-							token_in: args.token_in.toLowerCase(),
-							token_out: args.token_out.toLowerCase(),
-							destination: args.destination.toLowerCase(),
-							timestamp: Number(block.timestamp),
-						});
-						totalInserted++;
-						foundSwapForTx = true;
-					}
-				} catch {}
+						if (decoded.eventName === "Swap") {
+							const args = decoded.args as unknown as {
+								sender: string;
+								amount_in: bigint;
+								amount_out: bigint;
+								token_in: string;
+								token_out: string;
+								destination: string;
+							};
+							const block = await client.getBlock({
+								blockNumber: receipt.blockNumber!,
+							});
+							insertSwap(db, {
+								tx_hash,
+								log_index:
+									typeof recLog.logIndex !== "undefined"
+										? Number(recLog.logIndex)
+										: 0,
+								block_number: Number(receipt.blockNumber!),
+								sender: args.sender.toLowerCase(),
+								amount_in: args.amount_in.toString(),
+								amount_out: args.amount_out.toString(),
+								token_in: args.token_in.toLowerCase(),
+								token_out: args.token_out.toLowerCase(),
+								destination: args.destination.toLowerCase(),
+								timestamp: Number(block.timestamp),
+							});
+							totalInserted++;
+							foundSwapForTx = true;
+						}
+					} catch {}
+				}
+				if (foundSwapForTx) totalTxWithSwap++;
 			}
-			if (foundSwapForTx) totalTxWithSwap++;
-		});
+		);
 		if (failed > 0) {
+			for (const failure of failures) {
+				recordIndexerError(db, {
+					network: config.id,
+					stage: "swap_event_backfill",
+					txHash: failure.item.tx_hash,
+					item: failure.item,
+					error: failure.error,
+				});
+			}
 			throw new Error(
 				`Swap event backfill failed for ${failed} transaction(s); first failed tx: ${failures[0]?.item.tx_hash}`
 			);
@@ -623,6 +675,14 @@ export async function backfillTokenMetadata(
 			() => {}
 		);
 		if (failed > 0) {
+			for (const failure of failures) {
+				recordIndexerError(db, {
+					network: config.id,
+					stage: "token_metadata_backfill",
+					item: failure.item,
+					error: failure.error,
+				});
+			}
 			throw new Error(
 				`Token metadata backfill failed for ${failed} token(s); first failed token: ${failures[0]?.item}`
 			);

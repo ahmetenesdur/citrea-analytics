@@ -1,5 +1,10 @@
 import type Database from "better-sqlite3";
-import { formatScaledUsd, formatUsdFromRawAmount, parseIntegerAmount, usdScaledFromRawAmount } from "../utils/amounts";
+import {
+	formatScaledUsd,
+	formatUsdFromRawAmount,
+	parseIntegerAmount,
+	usdScaledFromRawAmount,
+} from "../utils/amounts";
 import { formatAmount } from "../utils/format";
 import { getDecimalsAndSymbols, getPrices } from "./helpers";
 
@@ -96,7 +101,12 @@ export function getWalletProfile(
 		const dec = decimalsMap.get(r.token_in.toLowerCase()) ?? 18;
 		const price = priceMap.get(r.token_in.toLowerCase());
 		if (price !== undefined) {
-			totalVolumeUsd += usdScaledFromRawAmount(parseIntegerAmount(r.amount_in), dec, price, 2);
+			totalVolumeUsd += usdScaledFromRawAmount(
+				parseIntegerAmount(r.amount_in),
+				dec,
+				price,
+				2
+			);
 			hasPrice = true;
 		}
 	}
@@ -148,7 +158,9 @@ export function getWalletProfile(
 		.all(addr) as Array<{ token: string; amount: string }>;
 
 	const outflowRows = db
-		.prepare(`SELECT token_out AS token, amount_out AS amount FROM swap_events WHERE sender = ?`)
+		.prepare(
+			`SELECT token_out AS token, amount_out AS amount FROM swap_events WHERE sender = ?`
+		)
 		.all(addr) as Array<{ token: string; amount: string }>;
 
 	const inflowMap = new Map<string, { total: bigint; cnt: number }>();
