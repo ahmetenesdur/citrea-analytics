@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { formatScaledUsd, formatUsdFromRawAmount, parseIntegerAmount, usdScaledFromRawAmount } from "../utils/amounts";
 import { formatAmount } from "../utils/format";
 import { getDecimalsAndSymbols, getPrices } from "./helpers";
 
@@ -65,15 +66,18 @@ export function getWalletProfile(
 	}
 
 	// 2. Total fees
-	const feeRow = db
+	const feeRows = db
 		.prepare(
-			`SELECT SUM(CAST(f.fee_wei AS REAL)) as totalFees
+			`SELECT f.fee_wei as feeWei
 			 FROM logs l JOIN fees f ON l.tx_hash = f.tx_hash
 			 WHERE l.from_address = ?`
 		)
-		.get(addr) as { totalFees: number | null } | undefined;
+		.all(addr) as Array<{ feeWei: string }>;
 
-	const totalFeesRaw = BigInt(Math.floor(feeRow?.totalFees ?? 0));
+	let totalFeesRaw = 0n;
+	for (const row of feeRows) {
+		totalFeesRaw += parseIntegerAmount(row.feeWei);
+	}
 	const totalFeesPaid = `${formatAmount(totalFeesRaw, config.currency.decimals, 6)} ${config.currency.symbol}`;
 
 	// 3. Total swaps
@@ -83,32 +87,45 @@ export function getWalletProfile(
 
 	// 4. Volume by token_in (for total volume USD)
 	const volumeRows = db
-		.prepare(
-			`SELECT token_in, SUM(CAST(amount_in AS REAL)) as totalIn, COUNT(*) as cnt
-			 FROM swap_events WHERE sender = ? GROUP BY token_in`
-		)
-		.all(addr) as Array<{ token_in: string; totalIn: number; cnt: number }>;
+		.prepare(`SELECT token_in, amount_in FROM swap_events WHERE sender = ?`)
+		.all(addr) as Array<{ token_in: string; amount_in: string }>;
 
-	let totalVolumeUsd = 0;
+	let totalVolumeUsd = 0n;
 	let hasPrice = false;
 	for (const r of volumeRows) {
 		const dec = decimalsMap.get(r.token_in.toLowerCase()) ?? 18;
 		const price = priceMap.get(r.token_in.toLowerCase());
 		if (price !== undefined) {
-			totalVolumeUsd += (r.totalIn / 10 ** dec) * price;
+			totalVolumeUsd += usdScaledFromRawAmount(parseIntegerAmount(r.amount_in), dec, price, 2);
 			hasPrice = true;
 		}
 	}
 
 	// 5. Top pairs
-	const pairRows = db
-		.prepare(
-			`SELECT token_in, token_out, COUNT(*) as cnt,
-			        SUM(CAST(amount_in AS REAL)) as volIn
-			 FROM swap_events WHERE sender = ?
-			 GROUP BY token_in, token_out ORDER BY cnt DESC LIMIT 5`
-		)
-		.all(addr) as Array<{ token_in: string; token_out: string; cnt: number; volIn: number }>;
+	const rawPairRows = db
+		.prepare(`SELECT token_in, token_out, amount_in FROM swap_events WHERE sender = ?`)
+		.all(addr) as Array<{ token_in: string; token_out: string; amount_in: string }>;
+	const pairMap = new Map<
+		string,
+		{ token_in: string; token_out: string; cnt: number; volIn: bigint }
+	>();
+	for (const row of rawPairRows) {
+		const tokenIn = row.token_in.toLowerCase();
+		const tokenOut = row.token_out.toLowerCase();
+		const key = `${tokenIn}:${tokenOut}`;
+		const current = pairMap.get(key) ?? {
+			token_in: tokenIn,
+			token_out: tokenOut,
+			cnt: 0,
+			volIn: 0n,
+		};
+		current.cnt += 1;
+		current.volIn += parseIntegerAmount(row.amount_in);
+		pairMap.set(key, current);
+	}
+	const pairRows = Array.from(pairMap.values())
+		.sort((a, b) => b.cnt - a.cnt)
+		.slice(0, 5);
 
 	const topPairs = pairRows.map((r) => {
 		const addrIn = r.token_in.toLowerCase();
@@ -121,32 +138,34 @@ export function getWalletProfile(
 			symbolOut: symbolMap.get(r.token_out.toLowerCase()) ?? "UNKNOWN",
 			swapCount: r.cnt,
 			totalVolumeUsd:
-				price !== undefined ? `$${((r.volIn / 10 ** dec) * price).toFixed(2)}` : "N/A",
+				price !== undefined ? formatUsdFromRawAmount(r.volIn, dec, price, 2) : "N/A",
 		};
 	});
 
 	// 6. Token net flow
 	const inflowRows = db
-		.prepare(
-			`SELECT token_in AS token, SUM(CAST(amount_in AS REAL)) AS total, COUNT(*) AS cnt
-			 FROM swap_events WHERE sender = ? GROUP BY token_in`
-		)
-		.all(addr) as Array<{ token: string; total: number; cnt: number }>;
+		.prepare(`SELECT token_in AS token, amount_in AS amount FROM swap_events WHERE sender = ?`)
+		.all(addr) as Array<{ token: string; amount: string }>;
 
 	const outflowRows = db
-		.prepare(
-			`SELECT token_out AS token, SUM(CAST(amount_out AS REAL)) AS total, COUNT(*) AS cnt
-			 FROM swap_events WHERE sender = ? GROUP BY token_out`
-		)
-		.all(addr) as Array<{ token: string; total: number; cnt: number }>;
+		.prepare(`SELECT token_out AS token, amount_out AS amount FROM swap_events WHERE sender = ?`)
+		.all(addr) as Array<{ token: string; amount: string }>;
 
-	const inflowMap = new Map<string, { total: number; cnt: number }>();
+	const inflowMap = new Map<string, { total: bigint; cnt: number }>();
 	for (const r of inflowRows) {
-		inflowMap.set(r.token.toLowerCase(), { total: r.total, cnt: r.cnt });
+		const token = r.token.toLowerCase();
+		const current = inflowMap.get(token) ?? { total: 0n, cnt: 0 };
+		current.total += parseIntegerAmount(r.amount);
+		current.cnt += 1;
+		inflowMap.set(token, current);
 	}
-	const outflowMap = new Map<string, { total: number; cnt: number }>();
+	const outflowMap = new Map<string, { total: bigint; cnt: number }>();
 	for (const r of outflowRows) {
-		outflowMap.set(r.token.toLowerCase(), { total: r.total, cnt: r.cnt });
+		const token = r.token.toLowerCase();
+		const current = outflowMap.get(token) ?? { total: 0n, cnt: 0 };
+		current.total += parseIntegerAmount(r.amount);
+		current.cnt += 1;
+		outflowMap.set(token, current);
 	}
 
 	const allTokens = new Set([...inflowMap.keys(), ...outflowMap.keys()]);
@@ -155,8 +174,8 @@ export function getWalletProfile(
 		const sym = symbolMap.get(token) ?? "UNKNOWN";
 		const inData = inflowMap.get(token);
 		const outData = outflowMap.get(token);
-		const rawIn = BigInt(Math.floor(inData?.total ?? 0));
-		const rawOut = BigInt(Math.floor(outData?.total ?? 0));
+		const rawIn = inData?.total ?? 0n;
+		const rawOut = outData?.total ?? 0n;
 
 		// Net flow: positive = net received (bought), negative = net sent (sold)
 		const netRaw = rawOut > rawIn ? rawOut - rawIn : -(rawIn - rawOut);
@@ -189,21 +208,18 @@ export function getWalletProfile(
 	// Volume USD per day (grouped by token for accurate conversion)
 	const dailyVolumeRows = db
 		.prepare(
-			`SELECT strftime('%Y-%m-%d', timestamp, 'unixepoch') as day,
-			        SUM(CAST(amount_in AS REAL)) as totalIn,
-			        token_in
-			 FROM swap_events WHERE sender = ?
-			 GROUP BY day, token_in`
+			`SELECT strftime('%Y-%m-%d', timestamp, 'unixepoch') as day, amount_in, token_in
+			 FROM swap_events WHERE sender = ?`
 		)
-		.all(addr) as Array<{ day: string; totalIn: number; token_in: string }>;
+		.all(addr) as Array<{ day: string; amount_in: string; token_in: string }>;
 
-	const dailyVolumeMap = new Map<string, number>();
+	const dailyVolumeMap = new Map<string, bigint>();
 	for (const r of dailyVolumeRows) {
 		const dec = decimalsMap.get(r.token_in.toLowerCase()) ?? 18;
 		const price = priceMap.get(r.token_in.toLowerCase());
 		if (price !== undefined) {
-			const usd = (r.totalIn / 10 ** dec) * price;
-			dailyVolumeMap.set(r.day, (dailyVolumeMap.get(r.day) ?? 0) + usd);
+			const usd = usdScaledFromRawAmount(parseIntegerAmount(r.amount_in), dec, price, 2);
+			dailyVolumeMap.set(r.day, (dailyVolumeMap.get(r.day) ?? 0n) + usd);
 		}
 	}
 
@@ -211,8 +227,8 @@ export function getWalletProfile(
 		date: r.day,
 		swapCount: r.cnt,
 		volumeUsd:
-			(dailyVolumeMap.get(r.day) ?? 0) > 0
-				? `$${(dailyVolumeMap.get(r.day) ?? 0).toFixed(2)}`
+			(dailyVolumeMap.get(r.day) ?? 0n) > 0n
+				? formatScaledUsd(dailyVolumeMap.get(r.day) ?? 0n, 2)
 				: "N/A",
 	}));
 
@@ -234,7 +250,7 @@ export function getWalletProfile(
 			: "N/A",
 		lastSeen: basicStats.lastSeen ? new Date(basicStats.lastSeen * 1000).toISOString() : "N/A",
 		totalFeesPaid,
-		totalVolumeUsd: hasPrice ? `$${totalVolumeUsd.toFixed(2)}` : "N/A",
+		totalVolumeUsd: hasPrice ? formatScaledUsd(totalVolumeUsd, 2) : "N/A",
 		topPairs,
 		tokensTraded,
 		dailyActivity,

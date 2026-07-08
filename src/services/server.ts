@@ -1,6 +1,12 @@
 import type Database from "better-sqlite3";
 import { createServer } from "node:http";
 import { ENV } from "../config/env";
+import {
+	formatScaledUsd,
+	formatUsdFromRawAmount,
+	parseIntegerAmount,
+	usdScaledFromRawAmount,
+} from "../utils/amounts";
 import { formatAmount } from "../utils/format";
 import { Router, sendJson } from "./router";
 import { getWalletProfile } from "./wallet";
@@ -66,8 +72,10 @@ export interface EnhancedMetrics {
 
 // Metrics Calculation Helpers
 
+type TokenVolumeRow = { token_in?: string; token_out?: string; total: bigint; cnt: number };
+
 function formatVolumeData(
-	rows: Array<{ token_in?: string; token_out?: string; total: number; cnt: number }>,
+	rows: Array<TokenVolumeRow>,
 	isOut: boolean,
 	decimalsMap: Map<string, number>,
 	symbolMap: Map<string, string>,
@@ -79,12 +87,11 @@ function formatVolumeData(
 		const dec = decimalsMap.get(addr) ?? 18;
 		const sym = symbolMap.get(addr) ?? "";
 		const price = priceMap.get(addr);
-		const raw = BigInt(Math.floor(r.total));
-		const normalized = Number(raw) / 10 ** dec;
+		const raw = r.total;
 
 		let volumeUsd = "N/A";
 		if (price !== undefined) {
-			volumeUsd = `$${(normalized * price).toFixed(2)}`;
+			volumeUsd = formatUsdFromRawAmount(raw, dec, price, 2);
 		}
 
 		return {
@@ -97,29 +104,70 @@ function formatVolumeData(
 	});
 }
 
+function getTokenVolumeRows(db: Database.Database, isOut: boolean): TokenVolumeRow[] {
+	const tokenColumn = isOut ? "token_out" : "token_in";
+	const amountColumn = isOut ? "amount_out" : "amount_in";
+	const rows = db
+		.prepare(`SELECT ${tokenColumn} AS token, ${amountColumn} AS amount FROM swap_events`)
+		.all() as Array<{ token: string; amount: string }>;
+	const grouped = new Map<string, { total: bigint; cnt: number }>();
+
+	for (const row of rows) {
+		const token = row.token.toLowerCase();
+		const current = grouped.get(token) ?? { total: 0n, cnt: 0 };
+		current.total += parseIntegerAmount(row.amount);
+		current.cnt += 1;
+		grouped.set(token, current);
+	}
+
+	return Array.from(grouped.entries())
+		.map(([token, value]) =>
+			isOut
+				? { token_out: token, total: value.total, cnt: value.cnt }
+				: { token_in: token, total: value.total, cnt: value.cnt }
+		)
+		.sort((a, b) => b.cnt - a.cnt);
+}
+
 function getTopTokenPairs(
 	db: Database.Database,
 	decimalsMap: Map<string, number>,
 	symbolMap: Map<string, string>,
 	priceMap: Map<string, number>
 ): TokenPairDetail[] {
-	const rows = db
-		.prepare(
-			`SELECT token_in, token_out, COUNT(*) as cnt, 
-              SUM(CAST(amount_in AS REAL)) as volIn, 
-              SUM(CAST(amount_out AS REAL)) as volOut
-             FROM swap_events 
-             GROUP BY token_in, token_out 
-             ORDER BY cnt DESC 
-             LIMIT 10`
-		)
+	const rawRows = db
+		.prepare("SELECT token_in, token_out, amount_in, amount_out FROM swap_events")
 		.all() as Array<{
 		token_in: string;
 		token_out: string;
-		cnt: number;
-		volIn: number;
-		volOut: number;
+		amount_in: string;
+		amount_out: string;
 	}>;
+	const grouped = new Map<
+		string,
+		{ token_in: string; token_out: string; cnt: number; volIn: bigint; volOut: bigint }
+	>();
+
+	for (const row of rawRows) {
+		const tokenIn = row.token_in.toLowerCase();
+		const tokenOut = row.token_out.toLowerCase();
+		const key = `${tokenIn}:${tokenOut}`;
+		const current = grouped.get(key) ?? {
+			token_in: tokenIn,
+			token_out: tokenOut,
+			cnt: 0,
+			volIn: 0n,
+			volOut: 0n,
+		};
+		current.cnt += 1;
+		current.volIn += parseIntegerAmount(row.amount_in);
+		current.volOut += parseIntegerAmount(row.amount_out);
+		grouped.set(key, current);
+	}
+
+	const rows = Array.from(grouped.values())
+		.sort((a, b) => b.cnt - a.cnt)
+		.slice(0, 10);
 
 	return rows.map((r) => {
 		const addrIn = r.token_in.toLowerCase();
@@ -132,16 +180,15 @@ function getTopTokenPairs(
 
 		let totalVolumeUsd = "N/A";
 		if (priceIn !== undefined) {
-			const volInUsd = (r.volIn / 10 ** decIn) * priceIn;
-			totalVolumeUsd = `$${volInUsd.toFixed(2)}`;
+			totalVolumeUsd = formatUsdFromRawAmount(r.volIn, decIn, priceIn, 2);
 		}
 
 		return {
 			tokenInAddress: r.token_in,
 			tokenOutAddress: r.token_out,
 			swapCount: r.cnt,
-			volumeIn: `${formatAmount(BigInt(Math.floor(r.volIn)), decIn, 2)} ${symIn}`,
-			volumeOut: `${formatAmount(BigInt(Math.floor(r.volOut)), decOut, 2)} ${symOut}`,
+			volumeIn: `${formatAmount(r.volIn, decIn, 2)} ${symIn}`,
+			volumeOut: `${formatAmount(r.volOut, decOut, 2)} ${symOut}`,
 			totalVolumeUsd,
 		};
 	});
@@ -161,11 +208,15 @@ function getDailyStats(
 
 	const feesRows = db
 		.prepare(
-			`SELECT strftime('%Y-%m-%d', l.timestamp, 'unixepoch') as day, SUM(CAST(f.fee_wei AS REAL)) as fees FROM logs l JOIN fees f ON l.tx_hash = f.tx_hash GROUP BY day`
+			`SELECT strftime('%Y-%m-%d', l.timestamp, 'unixepoch') as day, f.fee_wei as feeWei
+			 FROM logs l JOIN fees f ON l.tx_hash = f.tx_hash`
 		)
-		.all() as Array<{ day: string; fees: number }>;
+		.all() as Array<{ day: string; feeWei: string }>;
 
-	const feesMap = new Map(feesRows.map((r) => [r.day, BigInt(Math.floor(r.fees))]));
+	const feesMap = new Map<string, bigint>();
+	for (const r of feesRows) {
+		feesMap.set(r.day, (feesMap.get(r.day) ?? 0n) + parseIntegerAmount(r.feeWei));
+	}
 
 	const eventRows = db
 		.prepare(
@@ -176,20 +227,22 @@ function getDailyStats(
 
 	const volumeRows = db
 		.prepare(
-			`SELECT strftime('%Y-%m-%d', timestamp, 'unixepoch') as day, COUNT(DISTINCT tx_hash) as swapTxCount, SUM(CAST(amount_in AS REAL)) as totalIn, token_in FROM swap_events GROUP BY day, token_in`
+			`SELECT strftime('%Y-%m-%d', timestamp, 'unixepoch') as day, tx_hash, amount_in, token_in FROM swap_events`
 		)
-		.all() as Array<{ day: string; swapTxCount: number; totalIn: number; token_in: string }>;
+		.all() as Array<{ day: string; tx_hash: string; amount_in: string; token_in: string }>;
 
-	const dailyVolumeUsdMap = new Map<string, number>();
-	const dailySwapTxMap = new Map<string, number>();
+	const dailyVolumeUsdMap = new Map<string, bigint>();
+	const dailySwapTxMap = new Map<string, Set<string>>();
 
 	for (const r of volumeRows) {
-		dailySwapTxMap.set(r.day, (dailySwapTxMap.get(r.day) ?? 0) + r.swapTxCount);
+		const txSet = dailySwapTxMap.get(r.day) ?? new Set<string>();
+		txSet.add(r.tx_hash);
+		dailySwapTxMap.set(r.day, txSet);
 		const dec = decimalsMap.get(r.token_in.toLowerCase()) ?? 18;
 		const price = priceMap.get(r.token_in.toLowerCase());
 		if (price !== undefined) {
-			const usd = (r.totalIn / 10 ** dec) * price;
-			dailyVolumeUsdMap.set(r.day, (dailyVolumeUsdMap.get(r.day) ?? 0) + usd);
+			const usd = usdScaledFromRawAmount(parseIntegerAmount(r.amount_in), dec, price, 2);
+			dailyVolumeUsdMap.set(r.day, (dailyVolumeUsdMap.get(r.day) ?? 0n) + usd);
 		}
 	}
 
@@ -202,11 +255,11 @@ function getDailyStats(
 			date: r.day,
 			txCount: r.txCount,
 			uniqueActiveAddresses: r.totalUsers,
-			transactionsWithSwaps: dailySwapTxMap.get(r.day) ?? 0,
+			transactionsWithSwaps: dailySwapTxMap.get(r.day)?.size ?? 0,
 			swapEventCount: eventMap.get(r.day) ?? 0,
 			fees: `${formatAmount(dayFees, config.currency.decimals, 6)} ${config.currency.symbol}`,
 			averageFeePerTx: `${formatAmount(avgFee, config.currency.decimals, 6)} ${config.currency.symbol}`,
-			volumeUsd: vol !== undefined ? `$${vol.toFixed(2)}` : "N/A",
+			volumeUsd: vol !== undefined ? formatScaledUsd(vol, 2) : "N/A",
 		};
 	});
 }
@@ -225,10 +278,11 @@ export function calculateEnhancedMetrics(
 	).count;
 	const totalSwaps = (db.prepare("SELECT COUNT(*) as count FROM swap_events").get() as any).count;
 
-	const totalFeesRow = db
-		.prepare("SELECT SUM(CAST(fee_wei AS REAL)) as total FROM fees")
-		.get() as any;
-	const totalFeesRaw = BigInt(Math.floor(totalFeesRow?.total ?? 0));
+	const totalFeeRows = db.prepare("SELECT fee_wei FROM fees").all() as Array<{ fee_wei: string }>;
+	let totalFeesRaw = 0n;
+	for (const row of totalFeeRows) {
+		totalFeesRaw += parseIntegerAmount(row.fee_wei);
+	}
 	const totalFees = `${formatAmount(totalFeesRaw, config.currency.decimals, 6)} ${config.currency.symbol}`;
 	const avgFeeRaw = totalTxCount > 0 ? totalFeesRaw / BigInt(totalTxCount) : 0n;
 	const averageFeePerTx = `${formatAmount(avgFeeRaw, config.currency.decimals, 6)} ${config.currency.symbol}`;
@@ -238,31 +292,31 @@ export function calculateEnhancedMetrics(
 	const priceMap = getPrices(db);
 
 	// 3. Volume Analysis
-	const inboundVolumeRows = db
-		.prepare(
-			`SELECT token_in, SUM(CAST(amount_in AS REAL)) as total, COUNT(*) as cnt FROM swap_events GROUP BY token_in ORDER BY cnt DESC`
-		)
-		.all() as any;
-	const outboundVolumeRows = db
-		.prepare(
-			`SELECT token_out, SUM(CAST(amount_out AS REAL)) as total, COUNT(*) as cnt FROM swap_events GROUP BY token_out ORDER BY cnt DESC`
-		)
-		.all() as any;
+	const inboundVolumeRows = getTokenVolumeRows(db, false);
+	const outboundVolumeRows = getTokenVolumeRows(db, true);
 
 	const tokenMetrics = {
 		liquidityIn: formatVolumeData(inboundVolumeRows, false, decimalsMap, symbolMap, priceMap),
 		liquidityOut: formatVolumeData(outboundVolumeRows, true, decimalsMap, symbolMap, priceMap),
 	};
 
-	let totalVolumeUsdValue: number | null = null;
-	inboundVolumeRows.forEach((r: any) => {
+	const rawInboundRows = db
+		.prepare("SELECT token_in, amount_in FROM swap_events")
+		.all() as Array<{ token_in: string; amount_in: string }>;
+	let totalVolumeUsdCents: bigint | null = null;
+	for (const r of rawInboundRows) {
 		const dec = decimalsMap.get(r.token_in.toLowerCase()) ?? 18;
 		const price = priceMap.get(r.token_in.toLowerCase());
 		if (price !== undefined) {
-			if (totalVolumeUsdValue === null) totalVolumeUsdValue = 0;
-			totalVolumeUsdValue += (r.total / 10 ** dec) * price;
+			if (totalVolumeUsdCents === null) totalVolumeUsdCents = 0n;
+			totalVolumeUsdCents += usdScaledFromRawAmount(
+				parseIntegerAmount(r.amount_in),
+				dec,
+				price,
+				2
+			);
 		}
-	});
+	}
 
 	// 4. Leaders & Pairs
 	const topCallers = db
@@ -314,7 +368,7 @@ export function calculateEnhancedMetrics(
 			standardSlippageSwaps: Number(slippageStats?.total ?? 0) - Number(riskyCount),
 		},
 		cumulativeVolumeUsd:
-			totalVolumeUsdValue !== null ? `$${(totalVolumeUsdValue as number).toFixed(2)}` : "N/A",
+			totalVolumeUsdCents !== null ? formatScaledUsd(totalVolumeUsdCents, 2) : "N/A",
 		...(options?.includeEvents
 			? {
 					swapEvents: db

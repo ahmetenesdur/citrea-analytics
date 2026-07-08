@@ -20,6 +20,7 @@
 		"export:md": "tsx src/index.ts --incremental --export analytics.md --format md",
 		"db:check": "tsx src/scripts/check-db.ts",
 		"db:reset": "rm -f citrea_cache.db* monad_cache.db* && echo 'Databases deleted.'",
+		"test": "node --import tsx --test tests/*.test.ts",
 		"type-check": "tsc --noEmit",
 		"format": "prettier --write .",
 		"postinstall": "node -e \"try { require('better-sqlite3') } catch {}\""

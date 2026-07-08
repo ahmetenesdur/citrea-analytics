@@ -8,6 +8,7 @@ export function formatAmount(amount: bigint, decimals: number, fractionDigits = 
 	const base = 10n ** BigInt(decimals);
 	const integer = amount / base;
 	const fraction = amount % base;
+	if (decimals === 0) return integer.toString();
 	const fracStr = fraction.toString().padStart(decimals, "0");
 
 	// For small amounts (integer part is 0), show at least 2 significant digits

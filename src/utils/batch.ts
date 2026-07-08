@@ -4,9 +4,10 @@ export async function processInChunks<T>(
 	concurrency: number,
 	task: (item: T) => Promise<void>,
 	onProgress?: (processed: number) => void
-): Promise<{ processed: number; failed: number }> {
+): Promise<{ processed: number; failed: number; failures: Array<{ item: T; error: unknown }> }> {
 	let processed = 0;
 	let failed = 0;
+	const failures: Array<{ item: T; error: unknown }> = [];
 
 	for (let i = 0; i < items.length; i += concurrency) {
 		const chunk = items.slice(i, i + concurrency);
@@ -16,6 +17,7 @@ export async function processInChunks<T>(
 					await task(item);
 				} catch (error) {
 					failed++;
+					failures.push({ item, error });
 				} finally {
 					processed++;
 				}
@@ -26,5 +28,5 @@ export async function processInChunks<T>(
 		}
 	}
 
-	return { processed, failed };
+	return { processed, failed, failures };
 }

@@ -390,7 +390,7 @@ export async function backfillFees(
 		const rows = selectMissing.all(batch) as Array<{ tx_hash: string }>;
 		if (rows.length === 0) break;
 
-		const { processed } = await processInChunks(
+		const { processed, failed, failures } = await processInChunks(
 			rows,
 			concurrency,
 			async ({ tx_hash }) => {
@@ -406,6 +406,11 @@ export async function backfillFees(
 				// We don't need fine-grained progress per chunk here as we update outer loop
 			}
 		);
+		if (failed > 0) {
+			throw new Error(
+				`Fee backfill failed for ${failed} transaction(s); first failed tx: ${failures[0]?.item.tx_hash}`
+			);
+		}
 
 		totalProcessed += processed;
 		const percent = Math.min(100, (totalProcessed / totalMissing) * 100).toFixed(1);
@@ -458,7 +463,7 @@ export async function backfillSwapEvents(
 		const rows = selectMissing.all(batch) as Array<{ tx_hash: string }>;
 		if (rows.length === 0) break;
 
-		const { processed } = await processInChunks(rows, concurrency, async ({ tx_hash }) => {
+		const { processed, failed, failures } = await processInChunks(rows, concurrency, async ({ tx_hash }) => {
 			const receipt = await client.getTransactionReceipt({
 				hash: tx_hash as `0x${string}`,
 			});
@@ -504,6 +509,11 @@ export async function backfillSwapEvents(
 			}
 			if (foundSwapForTx) totalTxWithSwap++;
 		});
+		if (failed > 0) {
+			throw new Error(
+				`Swap event backfill failed for ${failed} transaction(s); first failed tx: ${failures[0]?.item.tx_hash}`
+			);
+		}
 
 		totalProcessed += processed;
 		const percent = Math.min(100, (totalProcessed / totalMissing) * 100).toFixed(1);
@@ -517,11 +527,23 @@ export async function backfillSwapEvents(
 	return { processed: totalProcessed, inserted: totalInserted, txWithSwap: totalTxWithSwap };
 }
 
+async function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+	let timer: ReturnType<typeof setTimeout>;
+	const timeout = new Promise<T>((resolve) => {
+		timer = setTimeout(() => resolve(fallback), ms);
+	});
+	try {
+		return await Promise.race([promise, timeout]);
+	} finally {
+		clearTimeout(timer!);
+	}
+}
+
 export async function backfillTokenMetadata(
 	db: Database.Database,
 	config: NetworkConfig,
 	batch = 200,
-	concurrency = 10
+	concurrency = 5
 ): Promise<{ processed: number; inserted: number }> {
 	const client = createClient(config);
 	const selectMissingTokens = db.prepare(
@@ -549,44 +571,43 @@ export async function backfillTokenMetadata(
 
 		const tokens = rows.map((r) => r.address as Address);
 
-		try {
-			const decCalls = tokens.map((address) => ({
-				address,
-				abi: erc20Abi,
-				functionName: "decimals" as const,
-			}));
-			const symCalls = tokens.map((address) => ({
-				address,
-				abi: erc20Abi,
-				functionName: "symbol" as const,
-			}));
-
-			const [decResults, symResults] = await Promise.all([
-				client.multicall({ contracts: decCalls, allowFailure: true }),
-				client.multicall({ contracts: symCalls, allowFailure: true }),
-			]);
-
-			for (let i = 0; i < tokens.length; i++) {
-				const address = tokens[i];
-				if (!address) {
+		const { failed, failures } = await processInChunks(
+			tokens,
+			concurrency,
+			async (addr) => {
+				if (!addr) {
 					processed++;
-					continue;
+					return;
 				}
-				const decRes = decResults[i] as {
-					status: "success" | "failure";
-					result?: number | bigint;
-				};
-				const symRes = symResults[i] as { status: "success" | "failure"; result?: string };
 
 				let decimals: number | bigint = 18;
-				let symbol: string = "UNKNOWN";
+				let symbol = "UNKNOWN";
 
-				if (decRes && decRes.status === "success" && decRes.result !== undefined) {
-					decimals = decRes.result as number | bigint;
-				}
-				if (symRes && symRes.status === "success" && symRes.result !== undefined) {
-					symbol = symRes.result as string;
-				}
+				try {
+					const dec = await withTimeout(
+						client.readContract({
+							address: addr,
+							abi: erc20Abi,
+							functionName: "decimals",
+						}),
+						10000,
+						undefined
+					);
+					if (dec !== undefined) decimals = dec;
+				} catch {}
+
+				try {
+					const sym = await withTimeout(
+						client.readContract({
+							address: addr,
+							abi: erc20Abi,
+							functionName: "symbol",
+						}),
+						10000,
+						undefined
+					);
+					if (sym !== undefined) symbol = sym;
+				} catch {}
 
 				const symUpper = symbol.toUpperCase();
 				let decSan = sanitizeDecimals(decimals);
@@ -595,43 +616,19 @@ export async function backfillTokenMetadata(
 				else if (symUpper === "WBTC") decSan = 8;
 				else if (symUpper === "WETH") decSan = 18;
 
-				insertMeta.run(address.toLowerCase(), decSan, symbol, null);
+				insertMeta.run(addr.toLowerCase(), decSan, symbol, null);
 				inserted++;
 				processed++;
-			}
-		} catch {
-			for (const addr of tokens) {
-				if (!addr) {
-					processed++;
-					continue;
-				}
-				try {
-					let decimals = await client.readContract({
-						address: addr as Address,
-						abi: erc20Abi,
-						functionName: "decimals",
-					});
-					let symbol = "";
-					try {
-						symbol = await client.readContract({
-							address: addr as Address,
-							abi: erc20Abi,
-							functionName: "symbol",
-						});
-					} catch {}
-					insertMeta.run(
-						addr.toLowerCase(),
-						sanitizeDecimals(decimals),
-						symbol || "UNKNOWN"
-					);
-					inserted++;
-				} catch {
-					// skip
-				} finally {
-					processed++;
-				}
-			}
+			},
+			() => {}
+		);
+		if (failed > 0) {
+			throw new Error(
+				`Token metadata backfill failed for ${failed} token(s); first failed token: ${failures[0]?.item}`
+			);
 		}
+
+		if (rows.length < batch) break;
 	}
 
 	return { processed, inserted };
